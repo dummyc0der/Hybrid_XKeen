@@ -36,6 +36,7 @@ file_netfilter_hook="/opt/etc/ndm/netfilter.d/proxy.sh"
 log_access="$directory_logs/$name_client/access.log"
 log_error="$directory_logs/$name_client/error.log"
 mihomo_config="$directory_configs_app/config.yaml"
+sing_box_config="/opt/etc/sing-box/config.json"
 file_port_proxying="$xkeen_cfg/port_proxying.lst"
 file_port_exclude="$xkeen_cfg/port_exclude.lst"
 file_ip_exclude="$xkeen_cfg/ip_exclude.lst"
@@ -1638,6 +1639,9 @@ else
             export CLASH_HOME_DIR="$directory_configs_app"
             "$name_client" >/dev/null 2>&1 &
         ;;
+        sing-box)
+            "$name_client" run -c "$sing_box_config" >/dev/null 2>&1 &
+        ;;
     esac
     _probe=0
     while [ "$_probe" -lt 60 ]; do
@@ -1797,6 +1801,7 @@ check_binary() {
     [ "$file" = "xray" ] && check_cmd="version"
     [ "$file" = "yq" ] && check_cmd="--version"
     [ "$file" = "mihomo" ] && check_cmd="-v"
+    [ "$file" = "sing-box" ] && check_cmd="version"
 
     if ! "$file" $check_cmd >/dev/null 2>&1; then
         log_error_router "Бинарный файл $file аварийно остановлен"
@@ -1832,6 +1837,9 @@ info_health_binary() {
             for file in mihomo yq; do
                 if ! check_binary "$file"; then add_to_missing "$file"; fi
             done
+            ;;
+       sing-box)
+            if ! check_binary sing-box; then add_to_missing "sing-box"; fi
             ;;
         esac
 
@@ -1943,6 +1951,13 @@ proxy_start() {
                             unset fd_out
                         else
                             "$name_client" &
+                        fi
+                        ;;
+                    sing-box)
+                        if [ "$extended_msg" = "off" ]; then
+                            nohup "$name_client" run -c "$sing_box_config" >/dev/null 2>&1 &
+                        else
+                            "$name_client" run -c "$sing_box_config" &
                         fi
                         ;;
                     *) log_error_terminal "Неизвестный прокси-клиент: ${yellow}$name_client${reset}" ;;
