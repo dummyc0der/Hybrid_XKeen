@@ -1954,8 +1954,10 @@ proxy_start() {
                         fi
                         ;;
                     sing-box)
-                        if [ "$extended_msg" = "off" ]; then
+                        apply_fd_limit
+                        if [ "$extended_msg" = "off" ] || [ -n "$fd_out" ]; then
                             nohup "$name_client" run -c "$sing_box_config" >/dev/null 2>&1 &
+                            unset fd_out
                         else
                             "$name_client" run -c "$sing_box_config" &
                         fi
