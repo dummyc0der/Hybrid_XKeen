@@ -11,51 +11,46 @@ process_geo_file() {
         return 1
     fi
 
-    test_github
+    # Получаем ожидаемый размер файла
+    local expected_size=""
+    printf "  Запрос информации о %s...\n" "$display_name"
 
-    local temp_file=$(mktemp)
-    local min_size=24576  # 24 KB
-
-    download() {
-        curl --connect-timeout 10 $curl_timeout -fL -o "$temp_file" "$1" >/dev/null 2>&1
-        return $?
-    }
-
-    printf "  Загрузка %s...\n" "$display_name"
-
-    if [ "$use_direct" = "true" ]; then
-        :
+    if expected_size=$(_get_expected_size "$url"); then
+        printf "  Ожидаемый размер: ${yellow}%s байт${reset}\n" "$expected_size"
     else
-        url="$gh_proxy/$url"
+        printf "  ${yellow}Предупреждение${reset}: Не удалось определить ожидаемый размер файла\n"
+        expected_size=""
     fi
 
-    download "$url"
-    if [ $? -eq 0 ]; then
-        :
+    local tmp_file="${geo_dir}/${filename}.tmp.$$"
+
+    if _download_and_validate_loop "$url" "$tmp_file" "$expected_size" "" "$display_name"; then
+        mv -f "$tmp_file" "$geo_dir/$filename"
     else
-        rm -f "$temp_file"
-        printf "  ${red}Ошибка${reset}: не удалось загрузить %s\n" "$display_name"
-        return 1
-    fi
+        # Обработка ошибок, если все попытки провалились
+        case "$_last_error" in
+            html_stub)
+                printf "  ${red}Ошибка${reset}: получена HTML-страница вместо dat-файла\n"
+                ;;
+            size|size_mismatch)
+                printf "  ${red}Ошибка${reset}: Размер загруженного файла не соответствует ожидаемому\n"
+                ;;
+            *)
+                local max_attempts=${retries_download:-1}
+                if [ "$max_attempts" -gt 1 ]; then
+                    printf "  ${red}Ошибка${reset}: не удалось загрузить %s после %d попыток\n" "$display_name" "$max_attempts"
+                else
+                    printf "  ${red}Ошибка${reset}: не удалось загрузить %s\n" "$display_name"
+                fi
+                ;;
+        esac
 
-    # Проверка размера файла
-    local actual_size=$(wc -c < "$temp_file")
-    if [ "$actual_size" -lt "$min_size" ]; then
-        printf "  ${red}Ошибка${reset}: загруженный файл слишком мал (%s bytes) или повреждён\n  Невозможно обновить. Оставляем старый файл\n\n" "$actual_size"
-        rm -f "$temp_file"
+        if [ "$update_flag" = "true" ] && { [ -f "$geo_dir/$filename" ] || [ -L "$geo_dir/$filename" ]; }; then
+            printf "  ${yellow}Инфо${reset}: Невозможно обновить %s. ${green}Оставляем старый файл${reset}\n\n" "$display_name"
+        else
+            printf "  ${yellow}Инфо${reset}: Невозможно загрузить %s\n\n" "$display_name"
+        fi
         return 1
-    fi
-
-    # Проверка на HTML
-    if grep -qi "<html" "$temp_file"; then
-        printf "  ${red}Ошибка${reset}: получена HTML-страница вместо dat-файла\n  Невозможно обновить. Оставляем старый файл\n\n"
-        rm -f "$temp_file"
-        return 1
-    fi
-
-    # Безопасная замена
-    if mv "$temp_file" "$geo_dir/$filename.new"; then
-        mv -f "$geo_dir/$filename.new" "$geo_dir/$filename"
     fi
 
     if [ "$update_flag" = "true" ]; then
@@ -63,7 +58,6 @@ process_geo_file() {
     else
         printf "  %s ${green}успешно установлен${reset}\n\n" "$display_name"
     fi
-
     return 0
 }
 
@@ -83,27 +77,18 @@ install_geosite() {
         fi
     fi
 
-    # Параллельная загрузка независимых геофайлов
-    local _pids=""
+    # Последовательная загрузка геофайлов вместо параллельной для совместимости с прогресс-баром
     if [ "$install_refilter_geosite" = "true" ] || [ "$update_refilter_geosite" = "true" ]; then
-        process_geo_file "$refilter_url" "geosite_refilter.dat" \
-            "GeoSite Re:filter" "$update_refilter_geosite" &
-        _pids="$_pids $!"
+        process_geo_file "$refilter_url" "geosite_refilter.dat" "GeoSite Re:filter" "$update_refilter_geosite"
     fi
 
     if [ "$install_v2fly_geosite" = "true" ] || [ "$update_v2fly_geosite" = "true" ]; then
-        process_geo_file "$v2fly_url" "geosite_v2fly.dat" \
-            "GeoSite V2Fly" "$update_v2fly_geosite" &
-        _pids="$_pids $!"
+        process_geo_file "$v2fly_url" "geosite_v2fly.dat" "GeoSite V2Fly" "$update_v2fly_geosite"
     fi
 
     if [ -n "$zkeen_datfile" ]; then
-        process_geo_file "$zkeen_url" "$zkeen_datfile" \
-            "GeoSite ZKeen" "$update_zkeen_geosite" &
-        _pids="$_pids $!"
+        process_geo_file "$zkeen_url" "$zkeen_datfile" "GeoSite ZKeen" "$update_zkeen_geosite"
     fi
-
-    [ -n "$_pids" ] && wait $_pids
 
     # Симлинки zkeen после успешной загрузки
     if [ -n "$zkeen_datfile" ]; then
@@ -133,27 +118,18 @@ install_geoip() {
         fi
     fi
 
-    # Параллельная загрузка независимых геофайлов
-    local _pids=""
+    # Последовательная загрузка геофайлов вместо параллельной для совместимости с прогресс-баром
     if [ "$install_refilter_geoip" = "true" ] || [ "$update_refilter_geoip" = "true" ]; then
-        process_geo_file "$refilterip_url" "geoip_refilter.dat" \
-            "GeoIP Re:filter" "$update_refilter_geoip" &
-        _pids="$_pids $!"
+        process_geo_file "$refilterip_url" "geoip_refilter.dat" "GeoIP Re:filter" "$update_refilter_geoip"
     fi
 
     if [ "$install_v2fly_geoip" = "true" ] || [ "$update_v2fly_geoip" = "true" ]; then
-        process_geo_file "$v2flyip_url" "geoip_v2fly.dat" \
-            "GeoIP V2Fly" "$update_v2fly_geoip" &
-        _pids="$_pids $!"
+        process_geo_file "$v2flyip_url" "geoip_v2fly.dat" "GeoIP V2Fly" "$update_v2fly_geoip"
     fi
 
     if [ -n "$zkeenip_datfile" ]; then
-        process_geo_file "$zkeenip_url" "$zkeenip_datfile" \
-            "GeoIP ZKeenIP" "$update_zkeenip_geoip" &
-        _pids="$_pids $!"
+        process_geo_file "$zkeenip_url" "$zkeenip_datfile" "GeoIP ZKeenIP" "$update_zkeenip_geoip"
     fi
-
-    [ -n "$_pids" ] && wait $_pids
 
     # Симлинки zkeenip после успешной загрузки
     if [ -n "$zkeenip_datfile" ]; then

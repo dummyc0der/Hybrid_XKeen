@@ -1,59 +1,93 @@
+# Валидаторы для fetch_with_mirrors: проверяют размер + базовый синтаксис
+# содержимого (catch HTML-stub и мусор от proxy-error-page).
+_validate_geoipset_v4() {
+    _validate_default "$1" "$2" || return 1
+    if ! grep -q "^[0-9]" "$1"; then
+        _last_error="content_v4"
+        return 1
+    fi
+    return 0
+}
+
+_validate_geoipset_v6() {
+    _validate_default "$1" "$2" || return 1
+    if ! grep -q ":" "$1"; then
+        _last_error="content_v6"
+        return 1
+    fi
+    return 0
+}
+
 # Функция для установки и обновления GeoIPSET
 install_geoipset_lst() {
-    mkdir -p "$ipset_cfg" || { echo "Ошибка: Не удалось создать директорию $ipset_cfg"; exit 1; }
+    local url="$1"
+    local dest_file="$2"
+    local display_name="$3"
+    local ip_type="$4"
 
-    test_github
+    local _validator_name="_validate_geoipset_v4"
+    if [ "$ip_type" != "ipv4" ]; then
+        _validator_name="_validate_geoipset_v6"
+    fi
 
-    url="$1"
-    dest_file="$2"
-    display_name="$3"
-    ip_type="$4"
+    # Получаем ожидаемый размер файла
+    local expected_size=""
+    printf "  Запрос информации о %s...\n" "$display_name"
 
-    temp_file=$(mktemp)
-    printf "  Загрузка %s...\n" "$display_name"
-
-    if [ "$use_direct" = "true" ]; then
-        fetch_url="$url"
+    if expected_size=$(_get_expected_size "$url"); then
+        printf "  Ожидаемый размер: ${yellow}%s байт${reset}\n" "$expected_size"
     else
-        fetch_url="$gh_proxy/$url"
+        printf "  ${yellow}Предупреждение${reset}: Не удалось определить ожидаемый размер файла\n"
+        expected_size=""
     fi
 
-    curl --connect-timeout 10 $curl_timeout -fL -o "$temp_file" "$fetch_url" >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        rm -f "$temp_file"
-        printf "  ${red}Ошибка${reset}: не удалось загрузить %s\n\n" "$display_name"
-        return 1
-    fi
+    local tmp_file="${dest_file}.tmp.$$"
 
-    # Проверка на HTML-страницу заглушку
-    if grep -qi "<html" "$temp_file"; then
-        rm -f "$temp_file"
-        printf "  ${red}Ошибка${reset}: получена HTML-страница вместо списка IP\n  Оставляем старый файл\n\n"
-        return 1
-    fi
+    if _download_and_validate_loop "$url" "$tmp_file" "$expected_size" "$_validator_name" "$display_name"; then
+        mv -f "$tmp_file" "$dest_file"
+    else
+        # Обработка ошибок, если все попытки провалились
+        case "$_last_error" in
+            html_stub)
+                printf "  ${red}Ошибка${reset}: получена HTML-страница вместо списка IP\n"
+                ;;
+            content_v4)
+                printf "  ${red}Ошибка${reset}: %s не содержит корректных IPv4-адресов\n" "$display_name"
+                ;;
+            content_v6)
+                printf "  ${red}Ошибка${reset}: %s не содержит корректных IPv6-адресов\n" "$display_name"
+                ;;
+            size|size_mismatch)
+                printf "  ${red}Ошибка${reset}: Размер загруженного файла не соответствует ожидаемому\n"
+                ;;
+            *)
+                local max_attempts=${retries_download:-1}
+                if [ "$max_attempts" -gt 1 ]; then
+                    printf "  ${red}Ошибка${reset}: не удалось загрузить %s после %d попыток\n" "$display_name" "$max_attempts"
+                else
+                    printf "  ${red}Ошибка${reset}: не удалось загрузить %s\n" "$display_name"
+                fi
+                ;;
+        esac
 
-    # Валидация
-    if [ "$ip_type" = "ipv4" ] && ! grep -q "^[0-9]" "$temp_file"; then
-        rm -f "$temp_file"
-        printf "  ${red}Ошибка${reset}: %s не содержит корректных IPv4-адресов\n  Оставляем старый файл\n\n" "$display_name"
-        return 1
-        elif [ "$ip_type" = "ipv6" ] && ! grep -q ":" "$temp_file"; then
-        rm -f "$temp_file"
-        printf "  ${red}Ошибка${reset}: %s не содержит корректных IPv6-адресов\n  Оставляем старый файл\n\n" "$display_name"
+        if [ "$action" != "init" ] && { [ -f "$dest_file" ] || [ -L "$dest_file" ]; }; then
+            printf "  ${yellow}Инфо${reset}: Невозможно обновить %s. ${green}Оставляем старый файл${reset}\n\n" "$display_name"
+        else
+            printf "  ${yellow}Инфо${reset}: Невозможно загрузить %s\n\n" "$display_name"
+        fi
         return 1
     fi
 
     [ "$action" = "init" ] && msg_geoipset="установлен" || msg_geoipset="обновлён"
-    mv -f "$temp_file" "$dest_file"
     printf "  %s ${green}успешно $msg_geoipset${reset}\n\n" "$display_name"
     return 0
 }
 
 load_geoipset() {
-    set="$1"
-    file="$2"
-    family="$3"
-    tmp="${set}_tmp"
+    local set="$1"
+    local file="$2"
+    local family="$3"
+    local tmp="${set}_tmp"
 
     # Заполняем tmp; основной набор подменяется только после успешного restore
     ipset create "$set" hash:net family "$family" -exist
@@ -67,7 +101,7 @@ load_geoipset() {
 }
 
 install_geoipset() {
-    action="$1"
+    local action="$1"
 
     if [ "$action" = "init" ]; then
         # Без TTY (cron, ssh -T) read получает EOF, default-case крутит while true
@@ -87,7 +121,7 @@ install_geoipset() {
 
                 case "$choice" in
                     0)
-                        printf "  Пропуск установки списков GeoIPSET\n\n"
+                        printf "  Выполнен пропуск установки списков GeoIPSET\n\n"
 
                         if [ ! -f "$ru_exclude_ipv4" ] && [ ! -f "$ru_exclude_ipv6" ]; then
                             bypass_cron_geoipset=true
@@ -95,6 +129,7 @@ install_geoipset() {
                         return 0
                         ;;
                     1)
+                        mkdir -p "$ipset_cfg" || { echo "Ошибка: Не удалось создать директорию $ipset_cfg"; exit 1; }
                         bypass_cron_geoipset=false
                         break
                         ;;
@@ -106,24 +141,30 @@ install_geoipset() {
         fi
     fi
 
-    local do_v4=0 do_v6=0
-    if ip -4 addr show 2>/dev/null | grep -q "inet " && command -v iptables >/dev/null 2>&1; then
-        if [ "$action" = "init" ] || [ -f "$ru_exclude_ipv4" ]; then
-            do_v4=1
+    if [ -d "$ipset_cfg" ]; then
+        local do_v4=0 do_v6=0
+        if ip -4 addr show 2>/dev/null | grep -q "inet " && command -v iptables >/dev/null 2>&1; then
+            if [ "$action" = "init" ] || [ -f "$ru_exclude_ipv4" ]; then
+                do_v4=1
+            fi
+        fi
+        if ip -6 addr show 2>/dev/null | grep -q "inet6 fe80::" && command -v ip6tables >/dev/null 2>&1; then
+            if [ "$action" = "init" ] || [ -f "$ru_exclude_ipv6" ]; then
+                do_v6=1
+            fi
+        fi
+    
+        # Последовательная загрузка списков вместо параллельной для совместимости с прогресс-баром
+        [ "$do_v4" = "1" ] && install_geoipset_lst "$geoipv4_url" "$ru_exclude_ipv4" "IPv4 (IPSet)" "ipv4"
+        [ "$do_v6" = "1" ] && install_geoipset_lst "$geoipv6_url" "$ru_exclude_ipv6" "IPv6 (IPSet)" "ipv6"
+        [ "$do_v4" = "1" ] && load_geoipset geo_exclude "$ru_exclude_ipv4" inet
+        [ "$do_v6" = "1" ] && load_geoipset geo_exclude6 "$ru_exclude_ipv6" inet6
+    
+        if [ ! -f "$ru_override" ]; then
+            cat << EOF > "$ru_override"
+
+# Добавьте IP и подсети, которые нужно исключить из IPSET ru_exclude
+EOF
         fi
     fi
-    if ip -6 addr show 2>/dev/null | grep -q "inet6 " && command -v ip6tables >/dev/null 2>&1; then
-        if [ "$action" = "init" ] || [ -f "$ru_exclude_ipv6" ]; then
-            do_v6=1
-        fi
-    fi
-
-    # Параллельная загрузка независимых списков
-    local _pids=""
-    [ "$do_v4" = "1" ] && { install_geoipset_lst "$geoipv4_url" "$ru_exclude_ipv4" "IPv4 (IPSet)" "ipv4" & _pids="$_pids $!"; }
-    [ "$do_v6" = "1" ] && { install_geoipset_lst "$geoipv6_url" "$ru_exclude_ipv6" "IPv6 (IPSet)" "ipv6" & _pids="$_pids $!"; }
-    [ -n "$_pids" ] && wait $_pids
-
-    [ "$do_v4" = "1" ] && load_geoipset geo_exclude "$ru_exclude_ipv4" inet
-    [ "$do_v6" = "1" ] && load_geoipset geo_exclude6 "$ru_exclude_ipv6" inet6
 }

@@ -1,9 +1,16 @@
 # Функция для установки XKeen
 install_xkeen() {
-    xkeen_archive="$ktmp_dir/xkeen.tar.gz"
+    xkeen_archive="$tmp_ram/xkeen.tar.gz"
 
     # Проверка наличия архива XKeen
     if [ -f "$xkeen_archive" ]; then
+        # Валидация целостности архива
+        if ! tar -tzf "$xkeen_archive" >/dev/null 2>&1; then
+            echo -e "  ${red}Ошибка${reset}: Архив XKeen повреждён или имеет неверный формат"
+            rm -f "$xkeen_archive"
+            return 1
+        fi
+
         # Распаковка архива
         tar -xzf "$xkeen_archive" -C "$install_dir" xkeen _xkeen
 
@@ -13,6 +20,8 @@ install_xkeen() {
             mv "$install_dir/_xkeen" "$install_dir/.xkeen"
         else
             echo -e "  ${red}Ошибка${reset}: _xkeen не была правильно перенесена"
+            rm -f "$xkeen_archive"
+            return 1
         fi
 
         # Удаление архива
@@ -24,4 +33,21 @@ install_xkeen() {
 check_keen_mode() {
     [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" = "1" ] && return 0
     keen_mode="unsupported"
+}
+
+new_features() {
+    if [ ! -d "$ipset_cfg" ]; then
+        test_github
+        smart_clear
+        install_geoipset init
+
+        if [ "$bypass_cron_geoipset" = "false" ] && [ "$info_update_geofile_cron" != "installed" ]; then
+            smart_clear
+            choice_update_cron
+            update_cron_geofile_task
+            smart_clear
+            choice_cron_time
+            install_cron
+        fi
+    fi
 }

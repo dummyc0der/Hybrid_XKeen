@@ -1,7 +1,6 @@
 #!/bin/sh
 
 # Информация о службе: Запуск / Остановка XKeen
-# Версия: 2.30
 
 # Окружение
 PATH="/opt/bin:/opt/sbin:/sbin:/bin:/usr/sbin:/usr/bin"
@@ -17,39 +16,49 @@ reset="\033[0m"
 name_client="xray"
 name_app="XKeen"
 name_policy="xkeen"
+name_policy_full="xkeen_full"
 name_profile="xkeen"
 name_chain="xkeen"
+name_ipset_deny_mac="xkeen_deny_mac"
 
 # Директории
 directory_os_modules="/lib/modules/$(uname -r)"
 directory_user_modules="/opt/lib/modules"
+directory_opkg_modules="/opt/lib/system-modules/$(uname -r)"
+directory_system_modules="/lib/system-modules/$(uname -r)"
 directory_configs_app="/opt/etc/$name_client"
 directory_xray_config="$directory_configs_app/configs"
 directory_xray_asset="$directory_configs_app/dat"
-directory_logs="/opt/var/log"
+log_dir="/opt/var/log"
 xkeen_cfg="/opt/etc/xkeen"
 ipset_cfg="$xkeen_cfg/ipset"
 install_dir="/opt/sbin"
 
 # Файлы
 file_netfilter_hook="/opt/etc/ndm/netfilter.d/proxy.sh"
-log_access="$directory_logs/$name_client/access.log"
-log_error="$directory_logs/$name_client/error.log"
+file_schedule_hook="/opt/etc/ndm/schedule.d/00-xkeen-hotspot-sync.sh"
+log_access="$log_dir/$name_client/access.log"
+log_error="$log_dir/$name_client/error.log"
 mihomo_config="$directory_configs_app/config.yaml"
 sing_box_config="/opt/etc/sing-box/config.json"
 file_port_proxying="$xkeen_cfg/port_proxying.lst"
 file_port_exclude="$xkeen_cfg/port_exclude.lst"
 file_ip_exclude="$xkeen_cfg/ip_exclude.lst"
 xkeen_config="$xkeen_cfg/xkeen.json"
+status_file="/opt/lib/opkg/status"
 file_pid_fd="/var/run/xkeen_fd.pid"
+file_cpu="/opt/sbin/.xkeen/01_info/08_info_router.sh"
+file_ca="/opt/etc/ssl/certs/ca-certificates.crt"
 ru_exclude_ipv4="$ipset_cfg/ru_exclude_ipv4.lst"
 ru_exclude_ipv6="$ipset_cfg/ru_exclude_ipv6.lst"
+ru_override="$ipset_cfg/ru_exclude_override.lst"
 
 # URL
 url_server="localhost:79"
 url_policy="rci/show/ip/policy"
 url_keenetic_port="rci/ip/http"
 url_redirect_port="rci/ip/static"
+url_hotspot="rci/show/ip/hotspot"
 
 # Настройки правил iptables
 table_id="111"
@@ -61,11 +70,14 @@ comment="-m comment --comment $comment_tag"
 custom_mark=""
 
 # DSCP-метки
+dscp_enable="on"
+dscp_force_proxy="61"
+dscp_force_proxy_tag="force-proxy"
 dscp_exclude="62"
 dscp_proxy="63"
 
 ipv4_proxy="127.0.0.1"
-ipv4_exclude="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 255.255.255.255"
+ipv4_exclude="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 255.255.255.255 78.47.125.180"
 ipv6_proxy="::1"
 ipv6_exclude="::/128 ::1/128 64:ff9b::/96 2001::/32 2002::/16 fd00::/8 ff00::/8 fe80::/10"
 
@@ -75,10 +87,15 @@ proxy_dns="off"
 # Проксирование трафика Entware
 proxy_router="off"
 
+# Строгая PBR-проверка mark / routing-mark
+pbr_strict="off"
+
 # Настройки запуска
+start_verbose="on"
 start_attempts=10
 start_auto="on"
 start_delay=20
+init_delay=0
 
 # Контроль файловых дескрипторов
 check_fd="off"
@@ -99,33 +116,19 @@ backup="on"
 aghfix="off"
 
 # Функции журналирования
-log_info_router() {
-    logger -p notice -t "$name_app" "$1"
-}
+log_info_router() { logger -p notice -t "$name_app" "$1"; }
+log_warning_router() { logger -p warning -t "$name_app" "$1"; }
+log_error_router() { logger -p error -t "$name_app" "$1"; }
 
-log_warning_router() {
-    logger -p warning -t "$name_app" "$1"
-}
+log_info_terminal() { echo -e "\n${green}Информация${reset}: $1" >&2; }
+log_warning_terminal() { echo -e "\n${yellow}Предупреждение${reset}: $1" >&2; }
+log_error_terminal() { echo -e "\n${red}Ошибка${reset}: $1" >&2; exit 1; }
 
-log_error_router() {
-    logger -p error -t "$name_app" "$1"
-}
-
-log_info_terminal() {
-    echo
-    echo -e "${green}Информация${reset}: $1" >&2
-}
-
-log_warning_terminal() {
-    echo
-    echo -e "${yellow}Предупреждение${reset}: $1" >&2
-}
-
-log_error_terminal() {
-    echo
-    echo -e "${red}Ошибка${reset}: $1" >&2
-    exit 1
-}
+if [ "$dscp_enable" = "off" ]; then
+    dscp_force_proxy=""
+    dscp_exclude=""
+    dscp_proxy=""
+fi
 
 print_policy_info() {
     found="$1"
@@ -142,8 +145,7 @@ print_policy_info() {
         if [ "$found" = "no" ]; then
             log_info_terminal "
   Политика '${yellow}$name_policy${reset}' не найдена в веб-интерфейсе роутера${ignore_line}
-  Прокси будет запущен для всего устройства
-"
+  Прокси будет запущен для всех клиентов устройства"
         fi
         return
     fi
@@ -177,29 +179,25 @@ print_policy_info() {
   Найдены политики '${yellow}${policies}${reset}'
   Прокси будет запущен для клиентов политик:
 ${detail_list}
-${custom_details}
-"
+${custom_details}"
         else
             if [ -z "$port_donor" ] && [ -z "$port_exclude" ]; then
                 log_info_terminal "
   Найдена политика '${yellow}$name_policy${reset}'
   Не определены целевые порты для XKeen
-  Прокси будет запущен для клиентов политики '${yellow}$name_policy${reset}' на всех портах
-"
+  Прокси будет запущен для клиентов политики '${yellow}$name_policy${reset}' на всех портах"
             elif [ -n "$port_donor" ]; then
                 log_info_terminal "
   Найдена политика '${yellow}$name_policy${reset}'
   Определены целевые порты для XKeen
   Прокси будет запущен для клиентов политики '${yellow}$name_policy${reset}'
-  на портах ${green}${port_donor}${reset}
-"
+  на портах ${green}${port_donor}${reset}"
             else
                 log_info_terminal "
   Найдена политика '${yellow}$name_policy${reset}'
   Определены порты исключения для XKeen
   Прокси будет запущен для клиентов политики '${yellow}$name_policy${reset}'
-  на всех портах кроме ${green}${port_exclude}${reset}
-"
+  на всех портах кроме ${green}${port_exclude}${reset}"
             fi
         fi
     else
@@ -208,52 +206,45 @@ ${custom_details}
   Политика '${yellow}$name_policy${reset}' не найдена в веб-интерфейсе роутера${ignore_line}
   Определены целевые порты для XKeen
   Прокси будет запущен для всех клиентов
-  на портах ${green}${port_donor}${reset}
-"
+  на портах ${green}${port_donor}${reset}"
         elif [ -n "$port_exclude" ]; then
             log_info_terminal "
   Политика '${yellow}$name_policy${reset}' не найдена в веб-интерфейсе роутера${ignore_line}
   Определены порты исключения для XKeen
   Прокси будет запущен для всех клиентов
-  на всех портах кроме ${green}${port_exclude}${reset}
-"
+  на всех портах кроме ${green}${port_exclude}${reset}"
         else
             log_info_terminal "
   Политика '${yellow}$name_policy${reset}' не найдена в веб-интерфейсе роутера${ignore_line}
   Не определены целевые порты для XKeen
-  Прокси будет запущен для всех клиентов на всех портах
-"
+  Прокси будет запущен для всех клиентов на всех портах"
         fi
     fi
 }
 
-utils="jq curl grep awk sed ipset"
+utils="jq curl grep awk sed ipset ip"
 [ "$name_client" = "mihomo" ] && utils="$utils yq"
 for cmd in $utils; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-         log_error_terminal "Не найдена необходимая утилита: ${yellow}$cmd${reset}"
-    fi
+    command -v "$cmd" >/dev/null 2>&1 || log_error_terminal "Не найдена необходимая утилита: ${yellow}$cmd${reset}"
 done
 
-log_clean() {
-    [ "$name_client" = "xray" ] && : > "$log_access" && : > "$log_error"
-}
+if readlink $(which ip) | grep -q 'busybox'; then
+    log_error_terminal "Обнаружена урезанная версия ip (BusyBox). Необходим пакет: ${yellow}ip-full${reset}"
+fi
+
+log_clean() { [ "$name_client" = "xray" ] && : > "$log_access" && : > "$log_error"; }
+
+curl_api() { curl --connect-timeout 2 -m 5 -kfsS "$@"; }
 
 api_cache_init() {
-    api_policy_json=$(curl -kfsS "${url_server}/${url_policy}" 2>/dev/null)
-    api_port_json=$(curl -kfsS "${url_server}/${url_keenetic_port}" 2>/dev/null)
-    api_static_json=$(curl -kfsS "${url_server}/${url_redirect_port}" 2>/dev/null)
+    api_policy_json=$(curl_api "${url_server}/${url_policy}" 2>/dev/null)
+    api_port_json=$(curl_api "${url_server}/${url_keenetic_port}" 2>/dev/null)
+    api_static_json=$(curl_api "${url_server}/${url_redirect_port}" 2>/dev/null)
 }
 
-refresh_port_cache() {
-    api_port_json=$(curl -kfsS "${url_server}/${url_keenetic_port}" 2>/dev/null)
-}
+refresh_port_cache() { api_port_json=$(curl_api "${url_server}/${url_keenetic_port}" 2>/dev/null); }
 
-json_get_ports() {
-    if [ -n "$api_port_json" ]; then
-        printf '%s' "$api_port_json" | jq -r '.port, (.ssl.port // empty)' 2>/dev/null
-    fi
-}
+json_get_ports() { [ -n "$api_port_json" ] && printf '%s' "$api_port_json" | jq -r '.port, (.ssl.port // empty)' 2>/dev/null; }
 
 # Получение портов Keenetic
 get_keenetic_port() {
@@ -302,10 +293,7 @@ apply_ipv6_state() {
 
     ip -6 addr show 2>/dev/null | grep -q "inet6 fe80::" || return 0
 
-    if ! wait_for_webui; then
-        log_error_router "Веб-интерфейс роутера недоступен"
-        return 1
-    fi
+    wait_for_webui || { log_error_router "Веб-интерфейс недоступен"; return 1; }
 
     sleep 5
 
@@ -347,23 +335,60 @@ strip_json_comments() {
         -e 's/[[:space:]]\{1,\}\/\/.*$//' "$@"
 }
 
+append_multiline() {
+    current_value="$1"
+    new_value="$2"
+
+    if [ -n "$current_value" ]; then
+        printf '%s\n%s' "$current_value" "$new_value"
+    else
+        printf '%s' "$new_value"
+    fi
+}
+
+format_routing_mark_items() {
+    item_label="$1"
+    mark_label="$2"
+    raw_items="$3"
+
+    printf '%b\n' "$raw_items" | awk -F '\t' -v item_label="$item_label" -v mark_label="$mark_label" '
+        NF == 0 || seen[$0]++ { next }
+        {
+            status = ($2 == "" ? mark_label " отсутствует" : "найден " mark_label " " $2)
+            print "  - " item_label " " $1 ": " status
+        }
+    '
+}
+
 # Функция валидации xkeen.json
 validate_xkeen_json() {
     [ ! -f "$xkeen_config" ] && return 0
-    if ! jq -e . "$xkeen_config" >/dev/null 2>&1; then
-            log_error_terminal "
+
+    if ! strip_json_comments "$xkeen_config" | jq -e . >/dev/null 2>&1; then
+        log_error_terminal "
   Валидация JSON: файл '${yellow}xkeen.json${reset}' содержит синтаксические ошибки
   Запуск прокси невозможен
 "
     fi
 
-    if ! jq -e '.xkeen.policy[]? | .name' "$xkeen_config" >/dev/null 2>&1; then
-        if jq -e '.xkeen' "$xkeen_config" >/dev/null 2>&1; then
-            log_error_terminal "
+    jq_check=
+    jq_check='
+      if has("xkeen") and .xkeen != null then
+        if .xkeen.policy then
+          .xkeen.policy | type == "array" and ([.[] | select(has("name") | not)] | length == 0)
+        else
+          true
+        end
+      else
+        true
+      end
+    '
+
+    if ! strip_json_comments "$xkeen_config" | jq -e "$jq_check" >/dev/null 2>&1; then
+        log_error_terminal "
   Файл '${yellow}xkeen.json${reset}' имеет неверную структуру
   Запуск прокси невозможен
 "
-        fi
     fi
 
     return 0
@@ -391,113 +416,412 @@ ${light_blue}${bad_list}${reset}
     return 0
 }
 
-# Функция проверки наличия метки 255
-validate_routing_mark() {
-    [ "$proxy_router" != "on" ] && return 0
+build_allowed_policy_marks() {
+    include_service_mark="$1"
+    allowed_marks=""
+    policy_hex_marks="$policy_mark"
 
-    mark_valid="false"
-    mark_msg=""
+    if [ "$include_service_mark" = "yes" ]; then
+        allowed_marks="255"
+    fi
+
+    if [ -n "$user_policies" ]; then
+        user_policy_hex_marks=$(printf '%s\n' "$user_policies" | awk -F'|' '$2 != "" {print "0x"$2}')
+        policy_hex_marks="$policy_hex_marks $user_policy_hex_marks"
+    fi
+
+    for policy_hex_mark in $policy_hex_marks; do
+        policy_mark_dec=$(hex_mark_to_decimal "$policy_hex_mark" 2>/dev/null)
+        [ -n "$policy_mark_dec" ] && allowed_marks="$allowed_marks $policy_mark_dec"
+    done
+
+    if [ -n "$allowed_marks" ]; then
+        allowed_marks=$(printf '%s\n' $allowed_marks | awk '!seen[$0]++' | tr '\n' ' ' | sed 's/ $//')
+    fi
+
+    printf '%s\n' "$allowed_marks"
+}
+
+format_allowed_marks_display() {
+    printf '%s\n' "$1" | tr ' ' '\n' | awk '
+        NF && !seen[$0]++ {
+            if (out != "") {
+                out = out ", " $0
+            } else {
+                out = $0
+            }
+        }
+        END {
+            print out
+        }
+    '
+}
+
+format_single_line_error() {
+    printf '%s' "$1" | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//'
+}
+
+convert_mihomo_yaml_to_json() {
+    config_file="$1"
+    tmp_base="${TMPDIR:-/tmp}/xkeen_mihomo_json.$$"
+    out_file="${tmp_base}.out"
+    err_file="${tmp_base}.err"
+    last_stderr=""
+
+    rm -f "$out_file" "$err_file"
+
+    for yq_variant in \
+        "dash_o_json" \
+        "dash_o_space_json" \
+        "eval_dash_o_json" \
+        "eval_dash_o_space_json"
+    do
+        : > "$out_file"
+        : > "$err_file"
+
+        case "$yq_variant" in
+            dash_o_json)
+                if yq -o=json '.' "$config_file" >"$out_file" 2>"$err_file" \
+                    && jq -e . <"$out_file" >/dev/null 2>&1; then
+                    cat "$out_file"
+                    rm -f "$out_file" "$err_file"
+                    return 0
+                fi
+                ;;
+            dash_o_space_json)
+                if yq -o json '.' "$config_file" >"$out_file" 2>"$err_file" \
+                    && jq -e . <"$out_file" >/dev/null 2>&1; then
+                    cat "$out_file"
+                    rm -f "$out_file" "$err_file"
+                    return 0
+                fi
+                ;;
+            eval_dash_o_json)
+                if yq eval -o=json '.' "$config_file" >"$out_file" 2>"$err_file" \
+                    && jq -e . <"$out_file" >/dev/null 2>&1; then
+                    cat "$out_file"
+                    rm -f "$out_file" "$err_file"
+                    return 0
+                fi
+                ;;
+            eval_dash_o_space_json)
+                if yq eval -o json '.' "$config_file" >"$out_file" 2>"$err_file" \
+                    && jq -e . <"$out_file" >/dev/null 2>&1; then
+                    cat "$out_file"
+                    rm -f "$out_file" "$err_file"
+                    return 0
+                fi
+                ;;
+        esac
+
+        candidate_stderr=$(format_single_line_error "$(cat "$err_file" 2>/dev/null)")
+        [ -n "$candidate_stderr" ] && last_stderr="$candidate_stderr"
+    done
+
+    rm -f "$out_file" "$err_file"
+
+    if [ -n "$last_stderr" ]; then
+        printf '%s' "не удалось преобразовать YAML в JSON через yq: $last_stderr"
+    else
+        printf '%s' "yq не вернул валидный JSON"
+    fi
+
+    return 1
+}
+
+validate_client_routing_mark() {
+    validation_mode="$1"
+    include_service_mark="$2"
+
     bad_items=""
     has_items="false"
-    all_marks_ok="true"
+    allowed_marks=$(build_allowed_policy_marks "$include_service_mark")
+    validation_errors=""
+    mark_msg=""
+    item_label=""
+    item_label_plural=""
+    config_hint=""
+    needs_attention="false"
+    allowed_marks_display=""
+    global_mark_valid="false"
+    provider_mark_valid="false"
 
+    allowed_marks_display=$(format_allowed_marks_display "$allowed_marks")
     if [ "$name_client" = "xray" ]; then
         mark_msg="mark"
+        item_label="outbound"
+        item_label_plural="outbounds"
+        config_hint="  Для Xray задайте ${green}mark${reset} в ${yellow}streamSettings.sockopt${reset} у всех реальных outbounds, кроме служебных (${yellow}blackhole${reset}, ${yellow}loopback${reset})"
 
         for file in "$directory_xray_config"/*.json; do
             [ -f "$file" ] || continue
 
-            if strip_json_comments "$file" | jq -e '.outbounds != null' >/dev/null 2>&1; then
-                has_items="true"
+            outbounds_state=$(strip_json_comments "$file" | jq -r '
+                if .outbounds == null then
+                    "missing"
+                elif (.outbounds | type) == "array" then
+                    "array"
+                else
+                    "invalid"
+                end
+            ' 2>&1)
+            outbounds_state_rc=$?
 
-                current_bad=$(strip_json_comments "$file" | jq -r '
-                    .outbounds[]? |
-                    select(.protocol != "blackhole" and .protocol != "dns") |
-                    select(.streamSettings.sockopt.mark != 255) |
-                    (.tag // .protocol)
-                ')
+            if [ "$outbounds_state_rc" -ne 0 ]; then
+                validation_errors=$(append_multiline "$validation_errors" "$(basename "$file"): $outbounds_state")
+                continue
+            fi
 
-                if [ -n "$current_bad" ]; then
-                     bad_items="${bad_items}${bad_items:+\n}$current_bad"
-                    all_marks_ok="false"
-                fi
+            case "$outbounds_state" in
+                missing)
+                    continue
+                    ;;
+                invalid)
+                    validation_errors=$(append_multiline "$validation_errors" "$(basename "$file"): поле .outbounds должно быть массивом")
+                    continue
+                    ;;
+                array)
+                    has_items="true"
+                    ;;
+            esac
+
+            current_bad=$(strip_json_comments "$file" | jq -r --arg allowed "$allowed_marks" '
+                def flatten_nested_arrays:
+                    if type == "array" then
+                        .[] | flatten_nested_arrays
+                    else
+                        .
+                    end;
+
+                (.outbounds // [])
+                | .[]?
+                | flatten_nested_arrays
+                | select(type == "object")
+                | select((.protocol // "") != "blackhole" and (.protocol // "") != "loopback")
+                | (.streamSettings? | if type == "object" then . else {} end) as $stream
+                | ($stream.sockopt? | if type == "object" then . else {} end) as $sockopt
+                | ($sockopt.mark? // null) as $mark
+                | select(($allowed | split(" ") | index((if $mark == null or $mark == "" then "" else ($mark | tostring) end))) | not)
+                | [(.tag // .protocol // "<unnamed>"), (if $mark == null or $mark == "" then "" else ($mark | tostring) end)] | @tsv
+            ' 2>&1)
+            current_bad_rc=$?
+
+            if [ "$current_bad_rc" -ne 0 ]; then
+                validation_errors=$(append_multiline "$validation_errors" "$(basename "$file"): $current_bad")
+                continue
+            fi
+
+            if [ -n "$current_bad" ]; then
+                bad_items=$(append_multiline "$bad_items" "$current_bad")
             fi
         done
 
     elif [ "$name_client" = "mihomo" ]; then
         mark_msg="routing-mark"
+        item_label="proxy"
+        item_label_plural="proxies"
+        config_hint="  Для Mihomo задайте ${green}routing-mark${reset} глобально либо у нужных ${yellow}proxies${reset}/${yellow}proxy-providers${reset}"
 
         if [ -f "$mihomo_config" ]; then
+            mihomo_json=$(convert_mihomo_yaml_to_json "$mihomo_config")
+            mihomo_json_rc=$?
 
-            if yq -e '.["routing-mark"] == 255' "$mihomo_config" >/dev/null 2>&1; then
-                mark_valid="true"
-            elif yq -e '
-                .proxy-providers[]? |
-                select(.override."routing-mark" == 255)
-            ' "$mihomo_config" >/dev/null 2>&1; then
-                mark_valid="true"
+            if [ "$mihomo_json_rc" -ne 0 ]; then
+                validation_errors=$(append_multiline "$validation_errors" "$(basename "$mihomo_config"): $mihomo_json")
             else
+                if ! printf '%s' "$mihomo_json" | jq -e . >/dev/null 2>&1; then
+                    validation_errors=$(append_multiline "$validation_errors" "$(basename "$mihomo_config"): yq не вернул валидный JSON")
+                else
+                root_kind=$(printf '%s' "$mihomo_json" | jq -r 'type' 2>&1)
+                root_kind_rc=$?
 
-                if yq -e '.proxies != null' "$mihomo_config" >/dev/null 2>&1; then
-                    has_items="true"
-                    current_bad=$(yq -r '
-                        .proxies[]? |
-                        select(."routing-mark" != 255) |
-                        .name
-                    ' "$mihomo_config")
+                if [ "$root_kind_rc" -ne 0 ]; then
+                    validation_errors=$(append_multiline "$validation_errors" "$(basename "$mihomo_config"): $root_kind")
+                elif [ "$root_kind" != "object" ]; then
+                    validation_errors=$(append_multiline "$validation_errors" "$(basename "$mihomo_config"): корень config.yaml должен быть map/object")
+                else
+                    global_mark_valid=$(printf '%s' "$mihomo_json" | jq -r --arg allowed "$allowed_marks" '
+                        .["routing-mark"] as $mark
+                        | if $mark != null and (($allowed | split(" ") | index($mark | tostring)) != null) then
+                            "true"
+                        else
+                            "false"
+                        end
+                    ' 2>&1)
+                    global_mark_valid_rc=$?
+                    [ "$global_mark_valid_rc" -ne 0 ] && validation_errors=$(append_multiline "$validation_errors" "$(basename "$mihomo_config"): $global_mark_valid")
 
-                    if [ -n "$current_bad" ]; then
-                        bad_items="${bad_items}${bad_items:+\n}$current_bad"
-                        all_marks_ok="false"
+                    provider_mark_valid=$(printf '%s' "$mihomo_json" | jq -r --arg allowed "$allowed_marks" '
+                        def values_or_items:
+                            if type == "object" or type == "array" then
+                                .[]?
+                            else
+                                empty
+                            end;
+
+                        [
+                            (.["proxy-providers"] // empty)
+                            | values_or_items
+                            | select(type == "object")
+                            | (.override? | if type == "object" then . else {} end)
+                            | .["routing-mark"]? as $mark
+                            | select($mark != null)
+                            | (($allowed | split(" ") | index($mark | tostring)) != null)
+                        ] | any
+                    ' 2>&1)
+                    provider_mark_valid_rc=$?
+                    [ "$provider_mark_valid_rc" -ne 0 ] && validation_errors=$(append_multiline "$validation_errors" "$(basename "$mihomo_config"): $provider_mark_valid")
+
+                    proxies_state=$(printf '%s' "$mihomo_json" | jq -r '
+                        if .proxies == null then
+                            "missing"
+                        elif (.proxies | type) == "array" then
+                            "array"
+                        else
+                            "invalid"
+                        end
+                    ' 2>&1)
+                    proxies_state_rc=$?
+
+                    if [ "$proxies_state_rc" -ne 0 ]; then
+                        validation_errors=$(append_multiline "$validation_errors" "$(basename "$mihomo_config"): $proxies_state")
+                    else
+                        case "$proxies_state" in
+                            missing)
+                                if [ "$global_mark_valid" != "true" ] && [ "$provider_mark_valid" != "true" ]; then
+                                    validation_errors=$(append_multiline "$validation_errors" "$(basename "$mihomo_config"): не найдены proxies и нет глобального/provider routing-mark для проверки")
+                                fi
+                                ;;
+                            invalid)
+                                validation_errors=$(append_multiline "$validation_errors" "$(basename "$mihomo_config"): поле .proxies должно быть массивом")
+                                ;;
+                            array)
+                                has_items="true"
+                                current_bad=$(printf '%s' "$mihomo_json" | jq -r --arg allowed "$allowed_marks" --arg global_valid "$global_mark_valid" '
+                                    def flatten_nested_arrays:
+                                        if type == "array" then
+                                            .[] | flatten_nested_arrays
+                                        else
+                                            .
+                                        end;
+
+                                    (.proxies // [])
+                                    | .[]?
+                                    | flatten_nested_arrays
+                                    | select(type == "object")
+                                    | (.["routing-mark"]? // null) as $mark
+                                    | select(
+                                        if $mark == null or $mark == "" then
+                                            $global_valid != "true"
+                                        else
+                                            (($allowed | split(" ") | index($mark | tostring)) == null)
+                                        end
+                                    )
+                                    | [(.name // .type // "<unnamed>"), (if $mark == null or $mark == "" then "" else ($mark | tostring) end)] | @tsv
+                                ' 2>&1)
+                                current_bad_rc=$?
+
+                                if [ "$current_bad_rc" -ne 0 ]; then
+                                    validation_errors=$(append_multiline "$validation_errors" "$(basename "$mihomo_config"): $current_bad")
+                                elif [ -n "$current_bad" ]; then
+                                    bad_items=$(append_multiline "$bad_items" "$current_bad")
+                                fi
+                                ;;
+                        esac
                     fi
                 fi
+                fi
             fi
+        else
+            validation_errors=$(append_multiline "$validation_errors" "config.yaml: файл не найден")
         fi
     fi
 
-    if [ "$mark_valid" != "true" ]; then
-        if [ "$has_items" = "true" ] && [ "$all_marks_ok" = "true" ]; then
-            mark_valid="true"
-        fi
+    if [ -n "$validation_errors" ] || [ -n "$bad_items" ] || { [ "$name_client" = "xray" ] && [ "$has_items" != "true" ]; }; then
+        needs_attention="true"
     fi
 
-    if [ "$mark_valid" != "true" ]; then
-        error_details=""
+    [ "$needs_attention" != "true" ] && return 0
 
-        if [ -n "$bad_items" ]; then
-            bad_list=$(printf "%b\n" "$bad_items" | awk '!seen[$0]++ {print "  - " $0}')
+    error_details=""
 
-            if [ "$name_client" = "xray" ]; then
-                error_details="
-  Подключения без метки:
+    if [ "$name_client" = "xray" ] && [ "$has_items" != "true" ] && [ -z "$validation_errors" ]; then
+        validation_errors=$(append_multiline "$validation_errors" "Не найдены реальные outbounds для проверки")
+    fi
+
+    if [ -n "$validation_errors" ]; then
+        validation_list=$(printf "%b\n" "$validation_errors" | awk '!seen[$0]++ {print "  - " $0}')
+        error_details="${error_details}
+
+  Не удалось полностью проверить конфигурацию:
+${light_blue}${validation_list}${reset}"
+    fi
+
+    if [ -n "$bad_items" ]; then
+        bad_list=$(format_routing_mark_items "$item_label" "$mark_msg" "$bad_items")
+        error_details="${error_details}
+
+  Проблемные ${item_label_plural}:
 ${light_blue}${bad_list}${reset}"
-                proxy_hint="  Добавьте маркировку во ВСЕ исходящие подключения (кроме blackhole и dns)"
-            else
-                error_details="
-  Прокси без метки:
-${light_blue}${bad_list}${reset}"
-                proxy_hint="  Добавьте в config.yaml маркировку трафика глобально либо в каждое исходящее подключение"
-            fi
-        fi
+    fi
 
-        log_warning_terminal "
-  Для проксирования трафика Entware требуется его маркировка
-  В конфигурации ${yellow}$name_client${reset} параметр ${green}$mark_msg: 255${reset} прописан не везде$error_details
+    if [ -n "$bad_items" ] || { [ "$name_client" = "xray" ] && [ "$has_items" != "true" ] && [ -z "$validation_errors" ]; }; then
+        validation_summary="не найден"
+        pbr_validation_summary="не найден корректный"
+    else
+        validation_summary="не удалось проверить"
+        pbr_validation_summary="не удалось проверить корректный"
+    fi
 
-$proxy_hint
+    if [ "$validation_mode" = "pbr" ]; then
+        log_error_terminal "
+  Включена strict PBR-проверка, но у исходящих подключений ${yellow}${name_client}${reset} ${pbr_validation_summary} ${yellow}mark/routing-mark${reset} политики Keenetic$error_details
 
-  Проксирование трафика Entware ${red}отключено${reset}
+  Разрешённые policy marks Keenetic: ${yellow}${allowed_marks_display}${reset}
+$config_hint
+  Служебная метка ${yellow}255${reset} не является policy mark и не подходит для PBR
+  Получите код политики командой ${yellow}xkeen -pbr codes${reset} и укажите его в конфигурации
+  Управление режимом: ${yellow}xkeen -pbr on${reset} | ${yellow}xkeen -pbr off${reset} | ${yellow}xkeen -pbr status${reset}
 "
-        proxy_router="off"
+    else
+        log_warning_terminal "
+  Проксирование Entware включено, но у исходящих подключений ${yellow}${name_client}${reset} ${validation_summary} ${yellow}mark/routing-mark${reset} для bypass$error_details
+
+  Для обычного Entware proxy можно использовать служебную метку ${yellow}255${reset}
+  Разрешённые bypass marks: ${yellow}${allowed_marks_display}${reset}
+$config_hint
+  Если нужно направить сам ${yellow}${name_client}${reset} через конкретную политику Keenetic, используйте код из ${yellow}xkeen -pbr codes${reset}
+"
     fi
 
     return 0
+}
+
+validate_entware_proxy_mark() {
+    [ "$proxy_router" != "on" ] && return 0
+    validate_client_routing_mark "entware" "yes"
+}
+
+validate_pbr_routing_mark() {
+    [ "$pbr_strict" != "on" ] && return 0
+
+    allowed_policy_marks=$(build_allowed_policy_marks "no")
+    if [ -z "$allowed_policy_marks" ]; then
+        log_error_terminal "
+  Не удалось получить коды политик Keenetic для PBR
+  Создайте или проверьте политику в веб-интерфейсе Keenetic и повторите ${yellow}xkeen -pbr codes${reset}
+  Служебная метка ${yellow}255${reset} не является policy mark и не подходит для PBR
+"
+    fi
+
+    validate_client_routing_mark "pbr" "no"
 }
 
 load_user_ipset_family() {
     set_name="$1"
     family="$2"
     addr_regex="$3"
+    source_file="$4"
     tmp="${set_name}_tmp"
 
     # Заполняем tmp; основной набор подменяется только после успешного pipeline
@@ -505,7 +829,7 @@ load_user_ipset_family() {
     ipset create "$tmp" hash:net family "$family" -exist
     ipset flush "$tmp"
 
-    if sed -e 's/\r$//' -e 's/#.*//' -e '/^[[:space:]]*$/d' "$file_ip_exclude" |
+    if sed -e 's/\r$//' -e 's/#.*//' -e '/^[[:space:]]*$/d' "$source_file" |
        grep -Eo "$addr_regex" |
        awk -v s="$tmp" '{print "add "s" "$1}' | ipset restore -exist; then
         ipset swap "$set_name" "$tmp"
@@ -516,8 +840,18 @@ load_user_ipset_family() {
 # Функция загрузки пользовательских исключений в ipset
 load_user_ipset() {
     [ ! -f "$file_ip_exclude" ] && return
-    [ "$iptables_supported" = "true" ] && load_user_ipset_family user_exclude inet '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?'
-    [ "$ip6tables_supported" = "true" ] && load_user_ipset_family user_exclude6 inet6 '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?'
+    [ "$iptables_supported" = "true" ] && load_user_ipset_family user_exclude inet '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "$file_ip_exclude"
+    [ "$ip6tables_supported" = "true" ] && load_user_ipset_family user_exclude6 inet6 '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' "$file_ip_exclude"
+
+    # Обработка списка исключений из geo_exclude
+    if [ -f "$ru_override" ]; then
+        [ "$iptables_supported" = "true" ] && load_user_ipset_family geo_override inet '([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?' "$ru_override"
+        [ "$ip6tables_supported" = "true" ] && load_user_ipset_family geo_override6 inet6 '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}(/[0-9]{1,3})?' "$ru_override"
+    else
+        # Если файла исключений нет, создаем пустые сеты, чтобы iptables не ругался на их отсутствие
+        [ "$iptables_supported" = "true" ] && ipset create geo_override hash:net family inet -exist
+        [ "$ip6tables_supported" = "true" ] && ipset create geo_override6 hash:net family inet6 -exist
+    fi
 }
 
 # Функция чтения пользовательских портов из файлов
@@ -574,13 +908,7 @@ validate_and_clean_ports() {
 # Функция обработки пользовательских портов
 process_user_ports() {
     raw_donor=$(read_ports_from_file "$file_port_proxying")
-
-    if [ -n "$raw_donor" ]; then
-        port_donor=$(validate_and_clean_ports "$raw_donor" "80,443")
-    else
-        port_donor=""
-    fi
-
+    [ -n "$raw_donor" ] && port_donor=$(validate_and_clean_ports "$raw_donor" "80,443") || port_donor=""
     port_exclude=$(validate_and_clean_ports "$(read_ports_from_file "$file_port_exclude")")
 
     if [ -n "$port_donor" ] && [ -n "$port_exclude" ]; then
@@ -594,17 +922,29 @@ process_user_ports() {
 
 # Функция нормализации сторонних политик
 process_custom_mark() {
-    [ -z "$custom_mark" ] && return
+    [ -n "$custom_mark" ] || return
 
-    clean_mark=""
-    for mark in $(echo "$custom_mark" | tr ',' ' '); do
-        val="${mark#0x}"
-        if echo "$val" | grep -Eq '^[0-9a-fA-F]+$'; then
-            clean_mark="$clean_mark 0x$val"
-        fi
+    local clean_mark=""
+    local val
+    local mark
+    local IFS=', '
+
+    for mark in $custom_mark; do
+        [ -n "$mark" ] || continue
+
+        val=${mark#0x}
+        val=${val#0X}
+
+        case "$val" in
+            ''|*[!0-9a-fA-F]*)
+                ;;
+            *)
+                clean_mark="$clean_mark 0x$val"
+                ;;
+        esac
     done
 
-    custom_mark="${clean_mark# }"
+    custom_mark=${clean_mark# }
 }
 
 # Проверка статуса прокси-клиента
@@ -617,29 +957,19 @@ check_dns_config() {
     if [ "$name_client" = "xray" ]; then
         for file in "$directory_xray_config"/*.json; do
             [ -f "$file" ] || continue
-            if strip_json_comments "$file" | jq -e '.dns.servers? != null' >/dev/null 2>&1; then
-                echo "true"
-                return
-            fi
+            strip_json_comments "$file" | jq -e '.dns.servers? != null' >/dev/null 2>&1 && { echo "true"; return; }
         done
     elif [ "$name_client" = "mihomo" ]; then
-        if [ -f "$mihomo_config" ] && yq -e '.dns.enable == true' "$mihomo_config" >/dev/null 2>&1; then
-            echo "true"
-            return
-        fi
+        [ -f "$mihomo_config" ] && yq -e '.dns.enable == true' "$mihomo_config" >/dev/null 2>&1 && { echo "true"; return; }
     fi
 
     echo "false"
-    return
 }
 file_dns=$(check_dns_config)
 
 # Кэш списка загруженных модулей; is_module_loaded читает его без форков
 _loaded_modules=""
-
-_refresh_modules_cache() {
-    _loaded_modules=" $(lsmod 2>/dev/null | awk '{print $1}' | tr '\n' ' ') "
-}
+_refresh_modules_cache() { _loaded_modules=" $(lsmod 2>/dev/null | awk '{print $1}' | tr '\n' ' ') "; }
 
 is_module_loaded() {
     case "$_loaded_modules" in
@@ -648,17 +978,28 @@ is_module_loaded() {
     esac
 }
 
+# Определение пути к модулям
+find_module_path() {
+    module_name="$1"
+
+    for dir in "$directory_os_modules" "$directory_user_modules" "$directory_opkg_modules" "$directory_system_modules"; do
+        if [ -f "$dir/$module_name" ]; then
+            echo "$dir/$module_name"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Загрузка модулей
 load_modules() {
-    module="$1"
-    name="${module%.ko}"
+    name="${1%.ko}"
 
     if ! is_module_loaded "$name"; then
-        for dir in "$directory_os_modules" "$directory_user_modules"; do
-            if [ -f "$dir/$module" ]; then
-                insmod "$dir/$module" >/dev/null 2>&1 && return
-            fi
-        done
+        module_path=$(find_module_path "$1")
+        if [ -n "$module_path" ]; then
+            insmod "$module_path" >/dev/null 2>&1
+        fi
     fi
 }
 
@@ -710,7 +1051,7 @@ get_modules() {
         fi
     fi
 
-    if [ -n "$dscp_exclude" ] || [ -n "$dscp_proxy" ]; then
+    if [ -n "$dscp_force_proxy" ] || [ -n "$dscp_exclude" ] || [ -n "$dscp_proxy" ]; then
         if ! is_module_loaded xt_dscp; then
             log_warning_router "Модуль xt_dscp не загружен"
             log_warning_terminal "
@@ -718,6 +1059,7 @@ get_modules() {
   Работа с DSCP-метками невозможна
   Установите компонент роутера '${yellow}Модули ядра подсистемы Netfilter${reset}'
 "
+            dscp_force_proxy=""
             dscp_exclude=""
             dscp_proxy=""
         fi
@@ -725,9 +1067,7 @@ get_modules() {
 }
 
 # Получение transparent inbound'ов Xray
-_invalidate_inbounds_cache() {
-    rm -f /tmp/xkeen-inbounds-cache
-}
+_invalidate_inbounds_cache() { rm -f /tmp/xkeen-inbounds-cache; }
 
 get_xray_transparent_inbounds() {
     cache_file="/tmp/xkeen-inbounds-cache"
@@ -770,10 +1110,14 @@ get_xray_transparent_inbounds() {
 
 get_xray_port_by_mode() {
     mode="$1"
+    # Отдельный DSCP force-inbound не должен подменять штатный transparent inbound.
+    ignore_tag="$dscp_force_proxy_tag"
+    ignore_tag_redirect="${dscp_force_proxy_tag}-redirect"
+    ignore_tag_tproxy="${dscp_force_proxy_tag}-tproxy"
     port=$(
         get_xray_transparent_inbounds |
-        awk -F '\t' -v mode="$mode" '
-            $1 == mode && $2 != "" {
+        awk -F '\t' -v mode="$mode" -v ignore_tag="$ignore_tag" -v ignore_tag_redirect="$ignore_tag_redirect" -v ignore_tag_tproxy="$ignore_tag_tproxy" '
+            $1 == mode && $4 != ignore_tag && $4 != ignore_tag_redirect && $4 != ignore_tag_tproxy && $2 != "" {
                 print $2
                 exit
             }
@@ -785,9 +1129,12 @@ get_xray_port_by_mode() {
 
 get_xray_network_by_mode() {
     mode="$1"
+    ignore_tag="$dscp_force_proxy_tag"
+    ignore_tag_redirect="${dscp_force_proxy_tag}-redirect"
+    ignore_tag_tproxy="${dscp_force_proxy_tag}-tproxy"
     network=$(
         get_xray_transparent_inbounds |
-        awk -F '\t' -v mode="$mode" '
+        awk -F '\t' -v mode="$mode" -v ignore_tag="$ignore_tag" -v ignore_tag_redirect="$ignore_tag_redirect" -v ignore_tag_tproxy="$ignore_tag_tproxy" '
             function add_networks(value, count, i, item) {
                 gsub(/,/, " ", value)
                 gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
@@ -804,7 +1151,7 @@ get_xray_network_by_mode() {
                 }
             }
 
-            $1 == mode {
+            $1 == mode && $4 != ignore_tag && $4 != ignore_tag_redirect && $4 != ignore_tag_tproxy {
                 add_networks($3)
             }
 
@@ -819,53 +1166,218 @@ get_xray_network_by_mode() {
     echo "$network"
 }
 
+get_xray_port_by_tag() {
+    tag="$1"
+    port=$(
+        get_xray_transparent_inbounds |
+        awk -F '\t' -v tag="$tag" '
+            $4 == tag && $2 != "" {
+                print $2
+                exit
+            }
+        '
+    )
+
+    echo "$port"
+}
+
+get_xray_port_by_tag_mode() {
+    tag="$1"
+    mode="$2"
+    port=$(
+        get_xray_transparent_inbounds |
+        awk -F '\t' -v tag="$tag" -v mode="$mode" '
+            $4 == tag && $1 == mode && $2 != "" {
+                print $2
+                exit
+            }
+        '
+    )
+
+    echo "$port"
+}
+
+get_xray_mode_by_tag() {
+    tag="$1"
+    mode=$(
+        get_xray_transparent_inbounds |
+        awk -F '\t' -v tag="$tag" '
+            $4 == tag && $1 != "" {
+                print $1
+                exit
+            }
+        '
+    )
+
+    echo "$mode"
+}
+
+get_xray_network_by_tag_mode() {
+    tag="$1"
+    mode="$2"
+    network=$(
+        get_xray_transparent_inbounds |
+        awk -F '\t' -v tag="$tag" -v mode="$mode" '
+            function add_networks(value, count, i, item) {
+                gsub(/,/, " ", value)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+                if (value == "") {
+                    return
+                }
+
+                count = split(value, items, /[[:space:]]+/)
+                for (i = 1; i <= count; i++) {
+                    item = items[i]
+                    if (item != "" && !seen[item]++) {
+                        order[++order_count] = item
+                    }
+                }
+            }
+
+            $4 == tag && $1 == mode {
+                add_networks($3)
+            }
+
+            END {
+                for (i = 1; i <= order_count; i++) {
+                    printf "%s%s", order[i], (i < order_count ? " " : "")
+                }
+            }
+        '
+    )
+
+    echo "$network"
+}
+
+get_xray_network_by_tag() {
+    tag="$1"
+    network=$(
+        get_xray_transparent_inbounds |
+        awk -F '\t' -v tag="$tag" '
+            function add_networks(value, count, i, item) {
+                gsub(/,/, " ", value)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+                if (value == "") {
+                    return
+                }
+
+                count = split(value, items, /[[:space:]]+/)
+                for (i = 1; i <= count; i++) {
+                    item = items[i]
+                    if (item != "" && !seen[item]++) {
+                        order[++order_count] = item
+                    }
+                }
+            }
+
+            $4 == tag {
+                add_networks($3)
+            }
+
+            END {
+                for (i = 1; i <= order_count; i++) {
+                    printf "%s%s", order[i], (i < order_count ? " " : "")
+                }
+            }
+        '
+    )
+
+    echo "$network"
+}
+
+get_mihomo_listener_field_by_name() {
+    listener_name="$1"
+    field_name="$2"
+
+    DSCP_FORCE_LISTENER="$listener_name" yq eval ".listeners[] | select(.name == strenv(DSCP_FORCE_LISTENER)) | .$field_name // \"\"" "$mihomo_config" 2>/dev/null | sed -n '1p'
+}
+
+get_mihomo_listener_rule_proxy_by_name() {
+    listener_name="$1"
+
+    yq eval '.rules[] // ""' "$mihomo_config" 2>/dev/null | awk -F',' -v tag="$listener_name" '
+        {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $3)
+        }
+        $1 == "IN-NAME" && $2 == tag { print $3; exit }
+    '
+}
+
+get_mihomo_listener_network_by_name() {
+    listener_name="$1"
+    listener_type=$(get_mihomo_listener_field_by_name "$listener_name" "type")
+
+    case "$listener_type" in
+        redir)
+            echo "tcp"
+            ;;
+        tproxy)
+            udp_enabled=$(get_mihomo_listener_field_by_name "$listener_name" "udp")
+            if [ "$udp_enabled" = "true" ]; then
+                echo "tcp udp"
+            else
+                echo "tcp"
+            fi
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
 # Получение порта для Redirect
 get_port_redirect() {
-    if [ "$name_client" = "mihomo" ]; then
+    if [ "$name_client" = "xray" ]; then
+        port=$(get_xray_port_by_mode "redirect")
+        [ -n "$port" ] && echo "$port" && return 0
+    elif [ "$name_client" = "mihomo" ]; then
         port=$(yq eval '.redir-port // ""' "$mihomo_config" 2>/dev/null)
         if [ -z "$port" ]; then
-            port=$(yq eval '.listeners[] | select(.type == "redir") | .port // ""' "$mihomo_config" 2>/dev/null)
+            port=$(DSCP_FORCE_TAG="$dscp_force_proxy_tag" DSCP_FORCE_TAG_REDIRECT="${dscp_force_proxy_tag}-redirect" DSCP_FORCE_TAG_TPROXY="${dscp_force_proxy_tag}-tproxy" yq eval '.listeners[] | select(.type == "redir" and (.name // "") != strenv(DSCP_FORCE_TAG) and (.name // "") != strenv(DSCP_FORCE_TAG_REDIRECT) and (.name // "") != strenv(DSCP_FORCE_TAG_TPROXY)) | .port // ""' "$mihomo_config" 2>/dev/null | sed -n '1p')
         fi
         [ -n "$port" ] && echo "$port" && return 0
     else
-        port=$(get_xray_port_by_mode "redirect")
-        [ -n "$port" ] && echo "$port" && return 0
+        return 1
     fi
-
-    echo ""
 }
 
 # Получение порта для TProxy
 get_port_tproxy() {
-    if [ "$name_client" = "mihomo" ]; then
+    if [ "$name_client" = "xray" ]; then
+        port=$(get_xray_port_by_mode "tproxy")
+        [ -n "$port" ] && echo "$port" && return 0
+    elif [ "$name_client" = "mihomo" ]; then
         port=$(yq eval '.tproxy-port // ""' "$mihomo_config" 2>/dev/null)
         if [ -z "$port" ]; then
-            port=$(yq eval '.listeners[] | select(.type == "tproxy") | .port // ""' "$mihomo_config" 2>/dev/null)
+            port=$(DSCP_FORCE_TAG="$dscp_force_proxy_tag" DSCP_FORCE_TAG_REDIRECT="${dscp_force_proxy_tag}-redirect" DSCP_FORCE_TAG_TPROXY="${dscp_force_proxy_tag}-tproxy" yq eval '.listeners[] | select(.type == "tproxy" and (.name // "") != strenv(DSCP_FORCE_TAG) and (.name // "") != strenv(DSCP_FORCE_TAG_REDIRECT) and (.name // "") != strenv(DSCP_FORCE_TAG_TPROXY)) | .port // ""' "$mihomo_config" 2>/dev/null | sed -n '1p')
         fi
         [ -n "$port" ] && echo "$port" && return 0
     else
-        port=$(get_xray_port_by_mode "tproxy")
-        [ -n "$port" ] && echo "$port" && return 0
+        return 1
     fi
-
-    echo ""
 }
 
 # Получение сети для Redirect
 get_network_redirect() {
-    if [ "$name_client" = "mihomo" ]; then
+    if [ "$name_client" = "xray" ]; then
+        network=$(get_xray_network_by_mode "redirect")
+        [ -n "$network" ] && echo "$network" && return 0
+    elif [ "$name_client" = "mihomo" ]; then
         [ -n "$port_redirect" ] && echo "tcp" && return 0
         echo "" && return 0
     else
-        network=$(get_xray_network_by_mode "redirect")
-        [ -n "$network" ] && echo "$network" && return 0
-        echo "" && return 0
+        return 1
     fi
 }
 
 # Получение сети для TProxy
 get_network_tproxy() {
-    if [ "$name_client" = "mihomo" ]; then
+    if [ "$name_client" = "xray" ]; then
+        network=$(get_xray_network_by_mode "tproxy")
+        [ -n "$network" ] && echo "$network" && return 0
+    elif [ "$name_client" = "mihomo" ]; then
         if [ -n "$port_redirect" ] && [ -n "$port_tproxy" ]; then
             echo "udp"
         elif [ -z "$port_redirect" ] && [ -n "$port_tproxy" ]; then
@@ -875,9 +1387,330 @@ get_network_tproxy() {
         fi
         return 0
     else
-        network=$(get_xray_network_by_mode "tproxy")
-        [ -n "$network" ] && echo "$network" && return 0
-        echo "" && return 0
+        return 1
+    fi
+}
+
+is_valid_single_port() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+
+    [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+normalize_network_list() {
+    printf '%s\n' "$1" | tr ',' ' ' | tr -s ' ' '\n' | awk '
+        $0 == "tcp" || $0 == "udp" {
+            if (!seen[$0]++) {
+                order[++count] = $0
+            }
+        }
+        END {
+            for (i = 1; i <= count; i++) {
+                printf "%s%s", order[i], (i < count ? " " : "")
+            }
+        }
+    '
+}
+
+resolve_dscp_force_proxy() {
+    dscp_force_proxy_status="inactive"
+    dscp_force_proxy_reason=""
+    port_dscp_force_proxy=""
+    mode_dscp_force_proxy=""
+    network_dscp_force_proxy=""
+    port_dscp_force_proxy_redirect=""
+    network_dscp_force_proxy_redirect=""
+    port_dscp_force_proxy_tproxy=""
+    network_dscp_force_proxy_tproxy=""
+
+    if [ ! -n "$dscp_force_proxy" ] && [ ! -n "$name_policy_full" ]; then
+        dscp_force_proxy_status="disabled"
+        dscp_force_proxy_reason="метка и политика отключены в конфиге XKeen"
+        return 1
+    fi
+
+    if [ "$mode_proxy" != "TProxy" ] && [ "$mode_proxy" != "Hybrid" ]; then
+        dscp_force_proxy_reason="текущий режим ${mode_proxy:-Other} не поддерживается"
+        return 1
+    fi
+
+    _refresh_modules_cache
+    if ! is_module_loaded xt_dscp; then
+        dscp_force_proxy_reason="не загружен модуль xt_dscp"
+        return 1
+    fi
+
+    find_dscp_force_listener() {
+        listener_names="$1"
+
+        dscp_force_found_tag=""
+        dscp_force_found_port=""
+        dscp_force_found_mode=""
+        dscp_force_found_network=""
+        dscp_force_found_proxy=""
+
+        for listener_name in $listener_names; do
+            port_lookup=$(get_mihomo_listener_field_by_name "$listener_name" "port")
+            mode_lookup=$(get_mihomo_listener_field_by_name "$listener_name" "type")
+            proxy_lookup=$(get_mihomo_listener_field_by_name "$listener_name" "proxy")
+            network_lookup=$(normalize_network_list "$(get_mihomo_listener_network_by_name "$listener_name")")
+            if [ -n "$port_lookup" ] || [ -n "$mode_lookup" ] || [ -n "$proxy_lookup" ]; then
+                dscp_force_found_tag="$listener_name"
+                dscp_force_found_port="$port_lookup"
+                dscp_force_found_mode="$mode_lookup"
+                dscp_force_found_network="$network_lookup"
+                dscp_force_found_proxy="$proxy_lookup"
+                return 0
+            fi
+        done
+
+        return 1
+    }
+
+    find_dscp_force_inbound() {
+        mode_lookup="$1"
+        tags_lookup="$2"
+
+        dscp_force_found_tag=""
+        dscp_force_found_port=""
+        dscp_force_found_network=""
+
+        for tag_lookup in $tags_lookup; do
+            port_lookup=$(get_xray_port_by_tag_mode "$tag_lookup" "$mode_lookup")
+            network_lookup=$(normalize_network_list "$(get_xray_network_by_tag_mode "$tag_lookup" "$mode_lookup")")
+            if [ -n "$port_lookup" ] || [ -n "$network_lookup" ]; then
+                dscp_force_found_tag="$tag_lookup"
+                dscp_force_found_port="$port_lookup"
+                dscp_force_found_network="$network_lookup"
+                return 0
+            fi
+        done
+
+        return 1
+    }
+
+    validate_dscp_force_listener() {
+        validate_mode="$1"
+        validate_required_network="$2"
+        validate_names="$3"
+        validate_label="$4"
+
+        if ! find_dscp_force_listener "$validate_names"; then
+            dscp_force_proxy_reason="не найден ${validate_label} listener для DSCP 61 (ожидается name '${dscp_force_proxy_tag}'"
+            case "$validate_mode" in
+                redir) dscp_force_proxy_reason="${dscp_force_proxy_reason} или '${dscp_force_proxy_tag}-redirect'" ;;
+                tproxy) dscp_force_proxy_reason="${dscp_force_proxy_reason} или '${dscp_force_proxy_tag}-tproxy'" ;;
+            esac
+            dscp_force_proxy_reason="${dscp_force_proxy_reason}, protocol ${validate_required_network})"
+            return 1
+        fi
+
+        if [ "$dscp_force_found_mode" != "$validate_mode" ]; then
+            dscp_force_proxy_reason="listener '${dscp_force_found_tag}' должен иметь type=${validate_mode}"
+            return 2
+        fi
+
+        if ! is_valid_single_port "$dscp_force_found_port"; then
+            dscp_force_proxy_reason="listener '${dscp_force_found_tag}' содержит некорректный порт"
+            return 2
+        fi
+
+        case " $dscp_force_found_network " in
+            *" $validate_required_network "*) ;;
+            *)
+                dscp_force_proxy_reason="listener '${dscp_force_found_tag}' не поддерживает ${validate_required_network}"
+                return 2
+                ;;
+        esac
+
+        if [ -z "$dscp_force_found_proxy" ]; then
+            rule_proxy_lookup=$(get_mihomo_listener_rule_proxy_by_name "$dscp_force_found_tag")
+            if [ -z "$rule_proxy_lookup" ]; then
+                dscp_force_proxy_reason="listener '${dscp_force_found_tag}' должен явно задавать proxy либо иметь правило IN-NAME,${dscp_force_found_tag} в rules"
+                return 2
+            fi
+            dscp_force_found_proxy="$rule_proxy_lookup"
+        fi
+
+        return 0
+    }
+
+    validate_dscp_force_inbound() {
+        validate_mode="$1"
+        validate_required_network="$2"
+        validate_tags="$3"
+        validate_label="$4"
+
+        if ! find_dscp_force_inbound "$validate_mode" "$validate_tags"; then
+            dscp_force_proxy_reason="не найден ${validate_label} inbound для DSCP 61 (ожидается tag '${dscp_force_proxy_tag}'"
+            case "$validate_mode" in
+                redirect) dscp_force_proxy_reason="${dscp_force_proxy_reason} или '${dscp_force_proxy_tag}-redirect'" ;;
+                tproxy) dscp_force_proxy_reason="${dscp_force_proxy_reason} или '${dscp_force_proxy_tag}-tproxy'" ;;
+            esac
+            dscp_force_proxy_reason="${dscp_force_proxy_reason}, protocol ${validate_required_network})"
+            return 1
+        fi
+
+        if ! is_valid_single_port "$dscp_force_found_port"; then
+            dscp_force_proxy_reason="inbound '${dscp_force_found_tag}' содержит некорректный порт"
+            return 2
+        fi
+
+        case " $dscp_force_found_network " in
+            *" $validate_required_network "*) ;;
+            *)
+                dscp_force_proxy_reason="inbound '${dscp_force_found_tag}' не поддерживает ${validate_required_network}"
+                return 2
+                ;;
+        esac
+
+        return 0
+    }
+
+    dscp_force_redirect_names="${dscp_force_proxy_tag}-redirect ${dscp_force_proxy_tag}"
+    dscp_force_tproxy_names="${dscp_force_proxy_tag}-tproxy ${dscp_force_proxy_tag}"
+
+    case "$name_client" in
+        xray)
+            if [ "$mode_proxy" = "Hybrid" ]; then
+                validate_dscp_force_inbound "redirect" "tcp" "$dscp_force_redirect_names" "redirect"
+                redirect_status=$?
+                [ "$redirect_status" -ne 0 ] && return "$redirect_status"
+
+                port_dscp_force_proxy_redirect="$dscp_force_found_port"
+                network_dscp_force_proxy_redirect="tcp"
+
+                validate_dscp_force_inbound "tproxy" "udp" "$dscp_force_tproxy_names" "tproxy"
+                tproxy_status=$?
+                [ "$tproxy_status" -ne 0 ] && return "$tproxy_status"
+
+                port_dscp_force_proxy_tproxy="$dscp_force_found_port"
+                network_dscp_force_proxy_tproxy="udp"
+
+                port_dscp_force_proxy="$port_dscp_force_proxy_tproxy"
+                mode_dscp_force_proxy="hybrid"
+                network_dscp_force_proxy=$(normalize_network_list "$network_dscp_force_proxy_redirect $network_dscp_force_proxy_tproxy")
+                dscp_force_proxy_status="active"
+                dscp_force_proxy_reason="Hybrid DSCP 61: tcp -> redirect:${port_dscp_force_proxy_redirect}, udp -> tproxy:${port_dscp_force_proxy_tproxy}"
+                return 0
+            fi
+
+            validate_dscp_force_inbound "tproxy" "tcp" "$dscp_force_tproxy_names" "tproxy"
+            tproxy_tcp_status=$?
+            if [ "$tproxy_tcp_status" -ne 0 ]; then
+                validate_dscp_force_inbound "tproxy" "udp" "$dscp_force_tproxy_names" "tproxy"
+                tproxy_udp_status=$?
+                [ "$tproxy_udp_status" -ne 0 ] && return "$tproxy_udp_status"
+            fi
+
+            port_dscp_force_proxy="$dscp_force_found_port"
+            mode_dscp_force_proxy="tproxy"
+            network_dscp_force_proxy="$dscp_force_found_network"
+            port_dscp_force_proxy_tproxy="$dscp_force_found_port"
+            network_dscp_force_proxy_tproxy="$dscp_force_found_network"
+            dscp_force_proxy_status="active"
+            dscp_force_proxy_reason="inbound '${dscp_force_found_tag}' найден: порт ${port_dscp_force_proxy}, network ${network_dscp_force_proxy}"
+            return 0
+            ;;
+        mihomo)
+            if [ "$mode_proxy" = "Hybrid" ]; then
+                validate_dscp_force_listener "redir" "tcp" "$dscp_force_redirect_names" "redirect"
+                redirect_status=$?
+                [ "$redirect_status" -ne 0 ] && return "$redirect_status"
+
+                port_dscp_force_proxy_redirect="$dscp_force_found_port"
+                network_dscp_force_proxy_redirect="tcp"
+                proxy_dscp_force_proxy_redirect="$dscp_force_found_proxy"
+
+                validate_dscp_force_listener "tproxy" "udp" "$dscp_force_tproxy_names" "tproxy"
+                tproxy_status=$?
+                [ "$tproxy_status" -ne 0 ] && return "$tproxy_status"
+
+                port_dscp_force_proxy_tproxy="$dscp_force_found_port"
+                network_dscp_force_proxy_tproxy="udp"
+                proxy_dscp_force_proxy_tproxy="$dscp_force_found_proxy"
+
+                port_dscp_force_proxy="$port_dscp_force_proxy_tproxy"
+                mode_dscp_force_proxy="hybrid"
+                network_dscp_force_proxy=$(normalize_network_list "$network_dscp_force_proxy_redirect $network_dscp_force_proxy_tproxy")
+                dscp_force_proxy_status="active"
+                dscp_force_proxy_reason="Hybrid DSCP 61: tcp -> redir:${port_dscp_force_proxy_redirect} (${proxy_dscp_force_proxy_redirect}), udp -> tproxy:${port_dscp_force_proxy_tproxy} (${proxy_dscp_force_proxy_tproxy})"
+                return 0
+            fi
+
+            validate_dscp_force_listener "tproxy" "tcp" "$dscp_force_tproxy_names" "tproxy"
+            tproxy_tcp_status=$?
+            if [ "$tproxy_tcp_status" -ne 0 ]; then
+                validate_dscp_force_listener "tproxy" "udp" "$dscp_force_tproxy_names" "tproxy"
+                tproxy_udp_status=$?
+                [ "$tproxy_udp_status" -ne 0 ] && return "$tproxy_udp_status"
+            fi
+
+            port_dscp_force_proxy="$dscp_force_found_port"
+            mode_dscp_force_proxy="tproxy"
+            network_dscp_force_proxy="$dscp_force_found_network"
+            port_dscp_force_proxy_tproxy="$dscp_force_found_port"
+            network_dscp_force_proxy_tproxy="$dscp_force_found_network"
+            dscp_force_proxy_status="active"
+            dscp_force_proxy_reason="listener '${dscp_force_found_tag}' найден: порт ${port_dscp_force_proxy}, network ${network_dscp_force_proxy}, proxy ${dscp_force_found_proxy}"
+            return 0
+            ;;
+        *)
+            dscp_force_proxy_reason="функция не поддерживается для ${name_client}"
+            return 1
+            ;;
+    esac
+}
+
+configure_dscp_force_proxy() {
+    resolve_dscp_force_proxy
+    status_code=$?
+
+    if [ "$status_code" -eq 2 ]; then
+        log_warning_router "$dscp_force_proxy_reason"
+        log_warning_terminal "
+  DSCP force-proxy '${yellow}${dscp_force_proxy_tag}${reset}' найден, но настроен неверно
+  ${light_blue}${dscp_force_proxy_reason}${reset}
+
+  Маршрутизация по DSCP ${green}${dscp_force_proxy}${reset} ${red}отключена${reset}
+"
+    fi
+
+    return 0
+}
+
+print_dscp_force_proxy_status() {
+    port_redirect=$(get_port_redirect)
+    network_redirect=$(get_network_redirect)
+    port_tproxy=$(get_port_tproxy)
+    network_tproxy=$(get_network_tproxy)
+    mode_proxy=$(get_mode_proxy)
+
+    resolve_dscp_force_proxy >/dev/null 2>&1
+
+    # Проверка DSCP 61
+    if [ "$dscp_force_proxy_status" = "active" ]; then
+        echo -e "  DSCP ${green}${dscp_force_proxy}${reset}: ${green}активно${reset} (${light_blue}${dscp_force_proxy_reason}${reset})"
+    elif [ "$dscp_force_proxy_status" = "disabled" ]; then
+        echo -e "  DSCP 61 force proxy: ${yellow}отключено${reset} (${light_blue}${dscp_force_proxy_reason}${reset})"
+    else
+        echo -e "  DSCP ${green}${dscp_force_proxy}${reset}: ${red}не активно${reset} (${light_blue}${dscp_force_proxy_reason}${reset})"
+    fi
+
+    # Проверка DSCP 62
+    if [ -n "$dscp_exclude" ]; then
+        echo -e "  DSCP ${green}$dscp_exclude${reset}: ${green}активно${reset} (${light_blue}исключение из проксирования${reset})"
+    else
+        echo -e "  DSCP ${green}$dscp_exclude${reset}: ${red}не активно${reset}"
+    fi
+
+    # Проверка DSCP 63
+    if [ -n "$dscp_proxy" ]; then
+        echo -e "  DSCP ${green}$dscp_proxy${reset}: ${green}активно${reset} (${light_blue}проксирование по системым правилам${reset})"
+    else
+        echo -e "  DSCP ${green}$dscp_proxy${reset}: ${red}не активно${reset}"
     fi
 }
 
@@ -950,35 +1783,92 @@ get_exclude_ip6() {
 
 # Получение метки политики
 get_policy_mark() {
-    if [ -n "$api_policy_json" ]; then
-        policy_mark=$(echo "$api_policy_json" | jq -r --arg pname "$name_policy" '.[] | select(.description | ascii_downcase == ($pname | ascii_downcase)) | .mark' 2>/dev/null)
+    _mark=""
+    if [ -n "$api_policy_json" ] && [ -n "$1" ]; then
+        _mark=$(echo "$api_policy_json" | jq -r --arg pname "$1" '.[] | select(.description | ascii_downcase == ($pname | ascii_downcase)) | .mark // empty' 2>/dev/null)
     fi
 
-    if [ -n "$policy_mark" ]; then
-        echo "0x${policy_mark}"
+    if [ -n "$_mark" ]; then
+        printf '0x%s\n' "$_mark"
     else
-        echo ""
+        printf '\n'
     fi
+}
+
+hex_mark_to_decimal() {
+    mark="$1"
+    mark="${mark#0x}"
+    mark="${mark#0X}"
+
+    case "$mark" in
+        ''|*[!0-9a-fA-F]*) return 1 ;;
+    esac
+
+    printf '%s\n' "$mark" | awk '
+        BEGIN { digits = "0123456789abcdef" }
+        {
+            value = 0
+            mark = tolower($0)
+            for (i = 1; i <= length(mark); i++) {
+                digit = substr(mark, i, 1)
+                pos = index(digits, digit)
+                if (pos == 0) {
+                    exit 1
+                }
+                value = value * 16 + pos - 1
+            }
+            printf "%.0f\n", value
+        }
+    '
+}
+
+# Атомарная синхронизация ipset xkeen_deny_mac с текущим состоянием hotspot API.
+# Идемпотентна: создаёт основной набор при первом вызове, в дальнейшем
+# наполняет tmp-набор и делает ipset swap. Вызывается на старте XKeen и
+# на каждой netfilter.d/schedule.d-инвокации — это даёт динамику без
+# `xkeen -restart` при работе Keenetic-расписаний (родительский контроль).
+sync_deny_mac_ipset() {
+    command -v ipset >/dev/null 2>&1 || return 0
+    ipset create "$name_ipset_deny_mac" hash:mac -exist 2>/dev/null || return 0
+    _xkeen_deny_tmp="${name_ipset_deny_mac}_tmp"
+    ipset create "$_xkeen_deny_tmp" hash:mac -exist 2>/dev/null
+    ipset flush "$_xkeen_deny_tmp" >/dev/null 2>&1
+    _xkeen_hotspot_json=$(curl_api "${url_server}/${url_hotspot}" 2>/dev/null)
+    if [ -n "$_xkeen_hotspot_json" ]; then
+        printf '%s' "$_xkeen_hotspot_json" | jq -r '
+            ((.host // . // []) |
+             (if type == "array" then .[] else . end)) |
+            select((.access // "") == "deny" and (.mac // "") != "") |
+            .mac
+        ' 2>/dev/null | tr '[:lower:]' '[:upper:]' | while IFS= read -r _xkeen_mac; do
+            [ -n "$_xkeen_mac" ] && ipset add "$_xkeen_deny_tmp" "$_xkeen_mac" -exist 2>/dev/null
+        done
+    fi
+    ipset swap "$_xkeen_deny_tmp" "$name_ipset_deny_mac" 2>/dev/null
+    ipset destroy "$_xkeen_deny_tmp" 2>/dev/null
+    unset _xkeen_deny_tmp _xkeen_hotspot_json _xkeen_mac
 }
 
 # Получаем пользовательские политики
 get_user_policies() {
     [ ! -f "$xkeen_config" ] && return
-    jq -r '.xkeen.policy[]? | "\(.name)|\(.port // "")" ' "$xkeen_config" 2>/dev/null
+    strip_json_comments "$xkeen_config" | jq -r '.xkeen.policy[]? | "\(.name)|\(.port // "")" ' 2>/dev/null
 }
 
 # Проверка на конфликт имен политик
 check_policy_name_conflict() {
     if [ -f "$xkeen_config" ]; then
-        conflict=$(jq -r --arg main "$name_policy" '.xkeen.policy[] | select((.name | ascii_downcase) == ($main | ascii_downcase)) | .name' "$xkeen_config" 2>/dev/null | head -n 1)
+        conflict=$(strip_json_comments "$xkeen_config" | jq -r \
+          --arg main "$name_policy" \
+          --arg full "$name_policy_full" \
+          '[ .xkeen.policy[] | select((.name | ascii_downcase) == ($main | ascii_downcase) or (.name | ascii_downcase) == ($full | ascii_downcase)) | .name ] | join(", ")' 2>/dev/null)
 
         if [ -n "$conflict" ]; then
             log_error_router "Ошибка конфигурации: Имя политики в xkeen.json совпадает с зарезервированным"
             log_error_terminal "
-  В файле '${yellow}xkeen.json${reset}' найдена политика с именем '${red}${conflict}${reset}'
-  Это имя зарезервировано основной службой XKeen
+  Имя пользовательской политики совпадает с зарезервированным: '${light_blue}${conflict}${reset}'
+  Устраните конфликт политик в файле '${yellow}xkeen.json${reset}'
 
-  Переименуйте пользовательскую политику в json-файле
   Запуск ${yellow}$name_client${reset} ${red}отменен${reset}
 "
         fi
@@ -987,54 +1877,50 @@ check_policy_name_conflict() {
 
 # Получаем порты пользовательских политик
 resolve_user_policies() {
-    api_exclude_ports=""
+    [ -f "$xkeen_config" ] && [ -n "$api_policy_json" ] || return
+
     api_exclude_ports=$(get_api_exclude_ports)
 
-    get_user_policies | while IFS='|' read -r pname pports; do
-        if [ -n "$api_policy_json" ]; then
-            mark=$(echo "$api_policy_json" | jq -r --arg pname "$pname" '.[] | select(.description | ascii_downcase == ($pname | ascii_downcase)) | .mark' 2>/dev/null | head -n 1)
-        fi
+    # Получаем сопоставленные политики одним вызовом jq
+    matched_policies=$(printf '%s' "$api_policy_json" | jq -r --argjson user_cfg "$(strip_json_comments "$xkeen_config")" '
+        ($user_cfg.xkeen.policy // []) as $up |
+        .[] as $api |
+        $up[] | 
+        select(
+            (.name // "" | ascii_downcase) == 
+            ($api.description // "" | ascii_downcase)
+        ) |
+        "\(.name)|\($api.mark // "")|\(.port // "")"
+    ' 2>/dev/null)
 
-        [ -z "$mark" ] && continue
+    [ -z "$matched_policies" ] && return
 
+    # Обрабатываем каждую политику в одном цикле
+    echo "$matched_policies" | while IFS='|' read -r pname mark pports; do
         if [ -z "$pports" ]; then
             # Порты не указаны -> режим "all" (все порты)
             if [ -n "$api_exclude_ports" ]; then
-                mode="exclude"
-                clean_ports="$api_exclude_ports"
+                echo "${pname}|${mark}|exclude|${api_exclude_ports}"
             else
-                mode="all"
-                clean_ports=""
+                echo "${pname}|${mark}|all|"
             fi
         else
             case "$pports" in
-                !*)
-                    mode="exclude"
-                    ports="${pports#!}"
-
-                    if [ -n "$api_exclude_ports" ]; then
-                        if [ -n "$ports" ]; then
-                            ports="$ports,$api_exclude_ports"
-                        else
-                            ports="$api_exclude_ports"
-                        fi
+                !*) mode="exclude"; ports="${pports#!}"
+                    [ -n "$api_exclude_ports" ] && ports="${ports:+$ports,}$api_exclude_ports" ;;
+                *) mode="include"; ports="$pports"
+                    if [ "$file_dns" = "true" ] && [ "$proxy_dns" = "on" ]; then
+                        case ",$ports," in
+                            *,53,*) ;;
+                            *) ports="53,$ports" ;;
+                        esac
                     fi
-                    ;;
-                *)
-                    mode="include"
-                    ports="$pports"
                     ;;
             esac
 
-            if [ "$file_dns" = "true" ] && [ "$proxy_dns" = "on" ] && [ "$mode" = "include" ]; then
-                echo "$ports" | tr ',' '\n' | grep -q '^53$' || ports="53,$ports"
-            fi
-
             clean_ports=$(validate_and_clean_ports "$ports")
-            [ -z "$clean_ports" ] && continue
+            [ -n "$clean_ports" ] && echo "${pname}|${mark}|${mode}|${clean_ports}"
         fi
-
-        echo "${pname}|${mark}|${mode}|${clean_ports}"
     done
 }
 
@@ -1062,6 +1948,8 @@ configure_firewall() {
 
     cat > "$file_netfilter_hook" <<'EOL'
 #!/bin/sh
+# XKeen: Auto-generated file. DO NOT EDIT!
+[ -f /tmp/xkeen_ready ] || exit 0
 EOL
 
     # Securely inject variables into the script
@@ -1082,24 +1970,35 @@ EOL
     inject_var name_chain "$name_chain"
     inject_var port_redirect "$port_redirect"
     inject_var port_tproxy "$port_tproxy"
+    inject_var port_dscp_force_proxy "$port_dscp_force_proxy"
+    inject_var port_dscp_force_proxy_redirect "$port_dscp_force_proxy_redirect"
+    inject_var port_dscp_force_proxy_tproxy "$port_dscp_force_proxy_tproxy"
     inject_var port_donor "$port_donor"
     inject_var port_exclude "$port_exclude"
     inject_var policy_mark "$policy_mark"
+    inject_var policy_mark_full "$policy_mark_full"
     inject_var comment_tag "$comment_tag"
     inject_var comment "$comment"
     inject_var custom_mark "$custom_mark"
     inject_var dscp_exclude "$dscp_exclude"
     inject_var dscp_proxy "$dscp_proxy"
+    inject_var dscp_force_proxy "$dscp_force_proxy"
+    inject_var dscp_force_proxy_tag "$dscp_force_proxy_tag"
+    inject_var mode_dscp_force_proxy "$mode_dscp_force_proxy"
+    inject_var network_dscp_force_proxy "$network_dscp_force_proxy"
+    inject_var network_dscp_force_proxy_redirect "$network_dscp_force_proxy_redirect"
+    inject_var network_dscp_force_proxy_tproxy "$network_dscp_force_proxy_tproxy"
     inject_var user_policies "$user_policies"
     inject_var table_redirect "$table_redirect"
     inject_var table_tproxy "$table_tproxy"
     inject_var table_mark "$table_mark"
     inject_var table_id "$table_id"
+    inject_var status_file "$status_file"
     inject_var file_dns "$file_dns"
+    inject_var file_cpu "$file_cpu"
+    inject_var file_ca "$file_ca"
     inject_var proxy_dns "$proxy_dns"
     inject_var proxy_router "$proxy_router"
-    inject_var directory_os_modules "$directory_os_modules"
-    inject_var directory_user_modules "$directory_user_modules"
     inject_var directory_configs_app "$directory_configs_app"
     inject_var directory_xray_config "$directory_xray_config"
     inject_var directory_xray_asset "$directory_xray_asset"
@@ -1113,6 +2012,9 @@ EOL
     inject_var ipv4_proxy "$ipv4_proxy"
     inject_var val_exclude_ip6 "$val_exclude_ip6"
     inject_var val_exclude_ip4 "$val_exclude_ip4"
+    inject_var name_ipset_deny_mac "$name_ipset_deny_mac"
+    inject_var url_server "$url_server"
+    inject_var url_hotspot "$url_hotspot"
 
     cat >> "$file_netfilter_hook" <<'EOL'
 
@@ -1122,6 +2024,34 @@ restart_script() {
 }
 
 if pidof "$name_client" >/dev/null; then
+
+    # Динамическая синхронизация ipset с deny-MAC из hotspot API.
+    # Закрывает обход built-in политики «Без доступа в интернет» при включенном
+    # проксировании: PREROUTING на эти MAC делает RETURN до TPROXY, пакет идёт
+    # в FORWARD, где штатно дропается NDM-цепочкой _NDM_HOTSPOT_FWD.
+    # Хук перезапускается NDM при netfilter rewrite, schedule.d дёргает этот же
+    # скрипт на start/stop расписаний — список MAC всегда актуален.
+    _xkeen_sync_deny_mac_ipset() {
+        command -v ipset >/dev/null 2>&1 || return 0
+        ipset create "$name_ipset_deny_mac" hash:mac -exist 2>/dev/null || return 0
+        _tmp="${name_ipset_deny_mac}_tmp"
+        ipset create "$_tmp" hash:mac -exist 2>/dev/null
+        ipset flush "$_tmp" >/dev/null 2>&1
+        _hjson=$(curl --connect-timeout 2 -m 5 -kfsS "${url_server}/${url_hotspot}" 2>/dev/null)
+        if [ -n "$_hjson" ]; then
+            printf '%s' "$_hjson" | jq -r '
+                ((.host // . // []) |
+                 (if type == "array" then .[] else . end)) |
+                select((.access // "") == "deny" and (.mac // "") != "") |
+                .mac
+            ' 2>/dev/null | tr '[:lower:]' '[:upper:]' | while IFS= read -r _m; do
+                [ -n "$_m" ] && ipset add "$_tmp" "$_m" -exist 2>/dev/null
+            done
+        fi
+        ipset swap "$_tmp" "$name_ipset_deny_mac" 2>/dev/null
+        ipset destroy "$_tmp" 2>/dev/null
+    }
+    _xkeen_sync_deny_mac_ipset
 
     # Аккумулируем правила в строки, применяем атомарно одним
     # iptables-restore --noflush на (family, table) в _xkeen_apply.
@@ -1136,12 +2066,6 @@ if pidof "$name_client" >/dev/null; then
         [ "$family" = "ip6tables" ] && [ "$ip6tables_supported" != "true" ] && return 0
 
         case "$1" in
-            -C)
-                # Custom chain :xkeen всегда flush'ится в blob, PREROUTING -A
-                # дедуплицируется через -D + -A в одной транзакции - поэтому
-                # имитируем "правила нет" и даём caller-у выйти на ветку -A/-I.
-                return 1
-                ;;
             -A|-I|-D)
                 _line=$*
                 case "${family}_${table}" in
@@ -1190,11 +2114,13 @@ if pidof "$name_client" >/dev/null; then
         _deletes=$($save_cmd -t "$_table" 2>/dev/null | awk \
             -v tag="$comment_tag" \
             -v c1="$name_chain" \
-            -v c2="${name_chain}_out" '
+            -v c2="${name_chain}_out" \
+            -v c3="${name_chain}_force" '
             index($0, tag) &&
             $1 == "-A" &&
             $2 != c1 &&
-            $2 != c2 {
+            $2 != c2 &&
+            $2 != c3 {
                 sub(/^-A /, "-D ")
                 print
             }
@@ -1203,14 +2129,15 @@ if pidof "$name_client" >/dev/null; then
         {
             printf '*%s\n' "$_table"
             printf ':%s -\n' "$name_chain"
+            { [ -n "$port_dscp_force_proxy" ] || [ -n "$policy_mark_full" ]; } && printf ':%s_force -\n' "$name_chain"
             [ "$proxy_router" = "on" ] && printf ':%s_out -\n' "$name_chain"
             [ -n "$_deletes" ] && printf '%s\n' "$_deletes"
             printf '%s' "$_rules"
             printf 'COMMIT\n'
         } | if [ "$_family" = "iptables" ]; then
-            iptables-restore --noflush
+            iptables-restore --noflush 2>/dev/null
         else
-            ip6tables-restore --noflush
+            ip6tables-restore --noflush 2>/dev/null
         fi
     }
 
@@ -1260,8 +2187,24 @@ if pidof "$name_client" >/dev/null; then
 
         ipset create "$set_name" "$set_type" family "$ipset_family" -exist || return
 
-        ipt -C "$chain" -m set --match-set "$set_name" dst $comment -j RETURN >/dev/null 2>&1 ||
         ipt -I "$chain" 1 -m set --match-set "$set_name" dst $comment -j RETURN >/dev/null 2>&1
+    }
+
+    add_geo_exclude() {
+        if [ "$family" = "ip6tables" ]; then
+            geo_set="geo_exclude6"
+            override_set="geo_override6"
+            ipset_family="inet6"
+        else
+            geo_set="geo_exclude"
+            override_set="geo_override"
+            ipset_family="inet"
+        fi
+
+        ipset create "$geo_set" hash:net family "$ipset_family" -exist
+        ipset create "$override_set" hash:net family "$ipset_family" -exist
+
+        ipt -I "$chain" 1 -m set --match-set "$geo_set" dst -m set ! --match-set "$override_set" dst $comment -j RETURN >/dev/null 2>&1
     }
 
     # Добавление правил iptables
@@ -1283,7 +2226,7 @@ if pidof "$name_client" >/dev/null; then
             else
                 set -- -m conntrack --ctstate ESTABLISHED,RELATED $comment -j CONNMARK --restore-mark
             fi
-            ipt -C "$chain" "$@" >/dev/null 2>&1 || ipt -I "$chain" 1 "$@" >/dev/null 2>&1
+            ipt -I "$chain" 1 "$@" >/dev/null 2>&1
         fi
 
         case "$mode_proxy" in
@@ -1291,37 +2234,35 @@ if pidof "$name_client" >/dev/null; then
                 if [ "$table" = "$table_redirect" ]; then
                     ipt -I "$chain" 1 -m conntrack --ctstate DNAT $comment -j RETURN >/dev/null 2>&1
                     add_ipset_exclude ext_exclude hash:ip
-                    add_ipset_exclude geo_exclude hash:net
                     add_ipset_exclude user_exclude hash:net
+                    add_geo_exclude
                     ipt -A "$chain" -p tcp $comment -j REDIRECT --to-port "$port_redirect" >/dev/null 2>&1
                 else
                     ipt -I "$chain" 1 -m conntrack --ctstate DNAT $comment -j RETURN >/dev/null 2>&1
                     add_ipset_exclude ext_exclude hash:ip
-                    add_ipset_exclude geo_exclude hash:net
                     add_ipset_exclude user_exclude hash:net
+                    add_geo_exclude
                     ipt -A "$chain" -p udp -m socket --transparent $comment -j MARK --set-mark "$table_mark" >/dev/null 2>&1
                     ipt -A "$chain" -p udp -m mark ! --mark 0 $comment -j CONNMARK --save-mark >/dev/null 2>&1
                     ipt -A "$chain" -p udp $comment -j TPROXY --on-ip "$proxy_ip" --on-port "$port_tproxy" --tproxy-mark "$table_mark" >/dev/null 2>&1
                 fi
                 ;;
             TProxy)
-                ipt -C "$chain" -m conntrack --ctstate DNAT $comment -j RETURN >/dev/null 2>&1 ||
                 ipt -I "$chain" 1 -m conntrack --ctstate DNAT $comment -j RETURN >/dev/null 2>&1
+                add_ipset_exclude ext_exclude hash:ip
+                add_ipset_exclude user_exclude hash:net
+                add_geo_exclude
                 for net in $network_tproxy; do
-                    add_ipset_exclude ext_exclude hash:ip
-                    add_ipset_exclude geo_exclude hash:net
-                    add_ipset_exclude user_exclude hash:net
                     ipt -A "$chain" -p "$net" -m socket --transparent $comment -j MARK --set-mark "$table_mark" >/dev/null 2>&1
                     ipt -A "$chain" -p "$net" -m mark ! --mark 0 $comment -j CONNMARK --save-mark >/dev/null 2>&1
                     ipt -A "$chain" -p "$net" $comment -j TPROXY --on-ip "$proxy_ip" --on-port "$port_tproxy" --tproxy-mark "$table_mark" >/dev/null 2>&1
                 done
                 ;;
             Redirect)
-                ipt -C "$chain" -m conntrack --ctstate DNAT $comment -j RETURN >/dev/null 2>&1 ||
                 ipt -I "$chain" 1 -m conntrack --ctstate DNAT $comment -j RETURN >/dev/null 2>&1
                 add_ipset_exclude ext_exclude hash:ip
-                add_ipset_exclude geo_exclude hash:net
                 add_ipset_exclude user_exclude hash:net
+                add_geo_exclude
                 for net in $network_redirect; do
                     ipt -A "$chain" -p "$net" $comment -j REDIRECT --to-port "$port_redirect" >/dev/null 2>&1
                 done
@@ -1334,6 +2275,65 @@ if pidof "$name_client" >/dev/null; then
                 ipt -I "$chain" -m dscp --dscp "$dscp" $comment -j RETURN >/dev/null 2>&1
             done
         fi
+
+        # DSCP force-proxy обрабатывается отдельной chain'ой xkeen_force в
+        # dedicated PREROUTING path'е соответствующей таблицы. Если не выйти
+        # здесь из обычной chain для тех же протоколов, пакет позже попадёт в
+        # штатный REDIRECT/TPROXY path и потеряет original dst.
+        if [ "$table" = "$table_redirect" ] && [ -n "$port_dscp_force_proxy_redirect" ] && [ -n "$dscp_force_proxy" ]; then
+            for net in $network_dscp_force_proxy_redirect; do
+                ipt -I "$chain" 1 -p "$net" -m dscp --dscp "$dscp_force_proxy" $comment -j RETURN >/dev/null 2>&1
+            done
+        fi
+
+        if [ "$table" = "$table_tproxy" ] && [ -n "$port_dscp_force_proxy_tproxy" ] && [ -n "$dscp_force_proxy" ]; then
+            for net in $network_dscp_force_proxy_tproxy; do
+                ipt -I "$chain" 1 -p "$net" -m dscp --dscp "$dscp_force_proxy" $comment -j RETURN >/dev/null 2>&1
+            done
+        fi
+    }
+
+    add_force_ipt_rule() {
+        family="$1"
+        table="$2"
+        chain="$3"
+
+        [ "$family" = "iptables" ] && [ "$iptables_supported" = "false" ] && return
+        [ "$family" = "ip6tables" ] && [ "$ip6tables_supported" = "false" ] && return
+
+        if [ "$table" = "$table_redirect" ]; then
+            [ -n "$port_dscp_force_proxy_redirect" ] || return
+        elif [ "$table" = "$table_tproxy" ]; then
+            [ -n "$port_dscp_force_proxy_tproxy" ] || return
+        else
+            return
+        fi
+
+        add_exclude_rules "$chain"
+
+        ipt -I "$chain" 1 -m conntrack --ctstate DNAT $comment -j RETURN >/dev/null 2>&1
+        ipt -I "$chain" 1 -m conntrack --ctstate INVALID $comment -j RETURN >/dev/null 2>&1
+
+        if [ "$table" = "$table_redirect" ]; then
+            for net in $network_dscp_force_proxy_redirect; do
+                ipt -A "$chain" -p "$net" $comment -j REDIRECT --to-port "$port_dscp_force_proxy_redirect" >/dev/null 2>&1
+            done
+        else
+            ipt -I "$chain" 1 -m conntrack --ctstate ESTABLISHED,RELATED $comment -j CONNMARK --restore-mark >/dev/null 2>&1
+            for net in $network_dscp_force_proxy_tproxy; do
+                ipt -A "$chain" -p "$net" -m socket --transparent $comment -j MARK --set-mark "$table_mark" >/dev/null 2>&1
+                ipt -A "$chain" -p "$net" -m mark ! --mark 0 $comment -j CONNMARK --save-mark >/dev/null 2>&1
+                ipt -A "$chain" -p "$net" $comment -j TPROXY --on-ip "$proxy_ip" --on-port "$port_dscp_force_proxy_tproxy" --tproxy-mark "$table_mark" >/dev/null 2>&1
+            done
+        fi
+
+        # Расскомментируйте блок если необходимо
+        # учитывать DSCP 62 в политике xkeen_full
+        # if [ -n "$dscp_exclude" ]; then
+            # for dscp in $dscp_exclude; do
+                # ipt -I "$chain" -m dscp --dscp "$dscp" $comment -j RETURN
+            # done
+        # fi
     }
 
     # Настройка таблицы маршрутов
@@ -1342,11 +2342,9 @@ if pidof "$name_client" >/dev/null; then
 
         # Определяем таблицу маршрутизации
         if [ -n "$policy_mark" ]; then
-            policy_table=$(ip rule show | awk -v policy="$policy_mark" '$0 ~ policy && /lookup/ && !/blackhole/ {print $(NF)}' | sed -n '1p')
-            source_table="$policy_table"
-        else
-            source_table="main"
+            policy_table=$(ip rule show | awk -v policy="$policy_mark" '$0 ~ policy && /lookup/ && !/blackhole/ {print $(NF); exit}')
         fi
+        source_table="${policy_table:-main}"
 
         # Проверяем есть ли default маршрут
         check_default() {
@@ -1356,7 +2354,7 @@ if pidof "$name_client" >/dev/null; then
             if [ "$source_table" = "main" ]; then
                 ip -"$ip_version" route show default 2>/dev/null | grep -q '^default'
             else
-                ip -"$ip_version" route show table all 2>/dev/null | grep -E "^[[:space:]]*default .* table $policy_table([[:space:]]|$)" | grep -vq 'unreachable' >/dev/null
+                ip -"$ip_version" route show table "$policy_table" 2>/dev/null | grep -E '^default ' | grep -vq 'unreachable'
             fi
         }
 
@@ -1381,7 +2379,7 @@ if pidof "$name_client" >/dev/null; then
         ip -"$ip_version" route show table "$source_table" 2>/dev/null | while read -r route_line; do
             case "$route_line" in
                 default*|unreachable*|blackhole*) continue ;;
-                *) ip -"$ip_version" route add table "$table_id" "$route_line" >/dev/null 2>&1 || true ;;
+                *) ip -"$ip_version" route add table "$table_id" $route_line >/dev/null 2>&1 || true ;;
             esac
         done
         return 0
@@ -1409,7 +2407,7 @@ if pidof "$name_client" >/dev/null; then
             else
                 set -- -m conntrack ! --ctstate INVALID -p "$net" -m multiport --dports "$chunk" $comment -j "$target"
             fi
-            ipt -C PREROUTING "$@" >/dev/null 2>&1 || ipt -A PREROUTING "$@" >/dev/null 2>&1
+            ipt -A PREROUTING "$@" >/dev/null 2>&1
             i=$((i + 7))
         done
     }
@@ -1419,26 +2417,45 @@ if pidof "$name_client" >/dev/null; then
         family="$1"
         table="$2"
 
+        # MAC-bypass для built-in «Без доступа в интернет»: RETURN из PREROUTING
+        # до xkeen-jumps, пакет минует TPROXY/REDIRECT/MARK и попадает в FORWARD,
+        # где NDM-цепочка _NDM_HOTSPOT_FWD его дропнет штатно. -m mac --mac-source
+        # видит L2-MAC только для устройств в одном broadcast-домене с роутером
+        # (LAN/Wi-Fi/guest-bridge); за L3-VLAN правило безвредно неактивно.
+        ipt -I PREROUTING 1 -m set --match-set "$name_ipset_deny_mac" src $comment -j RETURN >/dev/null 2>&1
+
+        if [ "$table" = "$table_redirect" ] && [ -n "$port_dscp_force_proxy_redirect" ] && [ -n "$dscp_force_proxy" ]; then
+            for force_net in $network_dscp_force_proxy_redirect; do
+                set -- -m conntrack ! --ctstate INVALID -p "$force_net" -m dscp --dscp "$dscp_force_proxy" $comment -j "${name_chain}_force"
+                ipt -A PREROUTING "$@" >/dev/null 2>&1
+            done
+        fi
+
+        if [ "$table" = "$table_tproxy" ] && [ -n "$port_dscp_force_proxy_tproxy" ] && [ -n "$dscp_force_proxy" ]; then
+            for force_net in $network_dscp_force_proxy_tproxy; do
+                set -- -m conntrack ! --ctstate INVALID -p "$force_net" -m dscp --dscp "$dscp_force_proxy" $comment -j "${name_chain}_force"
+                ipt -A PREROUTING "$@" >/dev/null 2>&1
+            done
+        fi
+
         for net in $networks; do
             if [ "$mode_proxy" = "Hybrid" ]; then
                 [ "$table" = "nat"    ] && [ "$net" != "tcp" ] && continue
                 [ "$table" = "mangle" ] && [ "$net" != "udp" ] && continue
             fi
 
-            if [ "$mode_proxy" = "TProxy" ]; then
-                proto_match=""
-            else
-                proto_match="-p $net"
-            fi
+            proto_match="-p $net"
+            all_ports_proto_match=""
+            [ "$mode_proxy" = "TProxy" ] && all_ports_proto_match="$proto_match"
 
             for dscp in $dscp_proxy; do
                 set -- -m conntrack ! --ctstate INVALID $proto_match -m dscp --dscp "$dscp" $comment -j "$name_chain"
-                ipt -C PREROUTING "$@" >/dev/null 2>&1 || ipt -A PREROUTING "$@" >/dev/null 2>&1
+                ipt -A PREROUTING "$@" >/dev/null 2>&1
             done
 
             if [ "$proxy_router" = "on" ]; then
                 set -- -i lo -m mark --mark "$table_mark" $proto_match $comment -j "$name_chain"
-                ipt -C PREROUTING "$@" >/dev/null 2>&1 || ipt -A PREROUTING "$@" >/dev/null 2>&1
+                ipt -A PREROUTING "$@" >/dev/null 2>&1
             fi
 
             # Пользовательские политики из xkeen.json
@@ -1452,18 +2469,24 @@ if pidof "$name_client" >/dev/null; then
                 pports=$(echo "$pports" | tr -d ' \r\n')
 
                 if [ "$pmode" = "all" ]; then
-                    set -- -m connmark --mark 0x"$pmark" -m conntrack ! --ctstate INVALID $comment -j "$name_chain"
-                    ipt -C PREROUTING "$@" >/dev/null 2>&1 || ipt -A PREROUTING "$@" >/dev/null 2>&1
+                    set -- -m connmark --mark 0x"$pmark" -m conntrack ! --ctstate INVALID $all_ports_proto_match $comment -j "$name_chain"
+                    ipt -A PREROUTING "$@" >/dev/null 2>&1
                 elif [ "$pmode" = "include" ]; then
                     add_multiport_rules "$family" "$table" "$net" "0x$pmark" "$pports" "$name_chain"
                 elif [ "$pmode" = "exclude" ]; then
                     add_multiport_rules "$family" "$table" "$net" "0x$pmark" "$pports" "RETURN"
                     set -- -m connmark --mark 0x"$pmark" -m conntrack ! --ctstate INVALID -p "$net" $comment -j "$name_chain"
-                    ipt -C PREROUTING "$@" >/dev/null 2>&1 || ipt -A PREROUTING "$@" >/dev/null 2>&1
+                    ipt -A PREROUTING "$@" >/dev/null 2>&1
                 fi
             done <<USER_POLICIES_EOF
 $user_policies
 USER_POLICIES_EOF
+
+            # Политика xkeen_full (принудительное проксирование)
+            if [ -n "$policy_mark_full" ]; then
+                set -- -m connmark --mark "$policy_mark_full" -m conntrack ! --ctstate INVALID -p "$net" $comment -j "${name_chain}_force"
+                ipt -A PREROUTING "$@" >/dev/null 2>&1
+            fi
 
             # Политика xkeen (стандартная)
             if [ -n "$policy_mark" ]; then
@@ -1474,11 +2497,11 @@ USER_POLICIES_EOF
                 elif [ -n "$port_exclude" ]; then
                     add_multiport_rules "$family" "$table" "$net" "$policy_mark" "$port_exclude" "RETURN"
                     set -- -m connmark --mark "$policy_mark" -m conntrack ! --ctstate INVALID -p "$net" $comment -j "$name_chain"
-                    ipt -C PREROUTING "$@" >/dev/null 2>&1 || ipt -A PREROUTING "$@" >/dev/null 2>&1
+                    ipt -A PREROUTING "$@" >/dev/null 2>&1
                 else
                     # Политика xkeen, когда порты не указаны (проксирование на всех портах)
-                    set -- -m connmark --mark "$policy_mark" -m conntrack ! --ctstate INVALID $comment -j "$name_chain"
-                    ipt -C PREROUTING "$@" >/dev/null 2>&1 || ipt -A PREROUTING "$@" >/dev/null 2>&1
+                    set -- -m connmark --mark "$policy_mark" -m conntrack ! --ctstate INVALID $all_ports_proto_match $comment -j "$name_chain"
+                    ipt -A PREROUTING "$@" >/dev/null 2>&1
                 fi
             # НЕТ политики xkeen
             else
@@ -1489,11 +2512,11 @@ USER_POLICIES_EOF
                 elif [ -n "$port_exclude" ]; then
                     add_multiport_rules "$family" "$table" "$net" "" "$port_exclude" "RETURN"
                     set -- -m conntrack ! --ctstate INVALID -p "$net" $comment -j "$name_chain"
-                    ipt -C PREROUTING "$@" >/dev/null 2>&1 || ipt -A PREROUTING "$@" >/dev/null 2>&1
+                    ipt -A PREROUTING "$@" >/dev/null 2>&1
                 # Если нет ни xkeen, ни пользовательских политик -> перехватываем всё
                 else
-                    set -- -m conntrack ! --ctstate INVALID $comment -j "$name_chain"
-                    ipt -C PREROUTING "$@" >/dev/null 2>&1 || ipt -A PREROUTING "$@" >/dev/null 2>&1
+                    set -- -m conntrack ! --ctstate INVALID $all_ports_proto_match $comment -j "$name_chain"
+                    ipt -A PREROUTING "$@" >/dev/null 2>&1
                 fi
             fi
         done
@@ -1515,12 +2538,22 @@ USER_POLICIES_EOF
 
         ipt -A "$out_chain" -o lo $comment -j RETURN >/dev/null 2>&1
         ipt -A "$out_chain" -m mark --mark 255 $comment -j RETURN >/dev/null 2>&1
+        policy_bypass_marks="$policy_mark"
+
+        if [ -n "$user_policies" ]; then
+            user_policy_marks=$(printf '%s\n' "$user_policies" | awk -F'|' '$2 != "" {print "0x"$2}')
+            policy_bypass_marks="$policy_bypass_marks $user_policy_marks"
+        fi
+
+        for bypass_mark in $policy_bypass_marks; do
+            [ -n "$bypass_mark" ] && ipt -A "$out_chain" -m mark --mark "$bypass_mark" $comment -j RETURN >/dev/null 2>&1
+        done
 
         add_exclude_rules "$out_chain"
 
         add_ipset_exclude ext_exclude hash:ip
-        add_ipset_exclude geo_exclude hash:net
         add_ipset_exclude user_exclude hash:net
+        add_geo_exclude
 
         chain="$orig_chain"
 
@@ -1530,21 +2563,17 @@ USER_POLICIES_EOF
                 [ "$table" = "mangle" ] && [ "$net" != "udp" ] && continue
             fi
 
-            if [ "$mode_proxy" = "TProxy" ]; then
-                proto_match=""
-            else
-                proto_match="-p $net"
-            fi
+            proto_match="-p $net"
 
             set -- -m conntrack ! --ctstate INVALID $proto_match $comment -j "$out_chain"
-            ipt -C OUTPUT "$@" >/dev/null 2>&1 || ipt -A OUTPUT "$@" >/dev/null 2>&1
+            ipt -A OUTPUT "$@" >/dev/null 2>&1
 
             if [ "$table" = "$table_redirect" ]; then
                 set -- -p "$net" $comment -j REDIRECT --to-port "$port_redirect"
-                ipt -C "$out_chain" "$@" >/dev/null 2>&1 || ipt -A "$out_chain" "$@" >/dev/null 2>&1
+                ipt -A "$out_chain" "$@" >/dev/null 2>&1
             elif [ "$table" = "$table_tproxy" ]; then
                 set -- -p "$net" $comment -j MARK --set-mark "$table_mark"
-                ipt -C "$out_chain" "$@" >/dev/null 2>&1 || ipt -A "$out_chain" "$@" >/dev/null 2>&1
+                ipt -A "$out_chain" "$@" >/dev/null 2>&1
             fi
         done
     }
@@ -1558,7 +2587,7 @@ USER_POLICIES_EOF
 
         all_marks=""
         [ -n "$policy_mark" ] && all_marks="$policy_mark"
-
+        [ -n "$policy_mark_full" ] && all_marks="$policy_mark_full $all_marks"
         [ -n "$custom_mark" ] && all_marks="$custom_mark $all_marks"
 
         if [ -n "$user_policies" ]; then
@@ -1572,7 +2601,7 @@ USER_POLICIES_EOF
 
             for proto in udp tcp; do
                 set -- -p "$proto" -m mark --mark "$mark" -m pkttype --pkt-type unicast -m "$proto" --dport 53 $comment -j REDIRECT --to-ports 53
-                ipt -C _NDM_HOTSPOT_DNSREDIR "$@" >/dev/null 2>&1 || ipt -I _NDM_HOTSPOT_DNSREDIR "$@" >/dev/null 2>&1
+                ipt -I _NDM_HOTSPOT_DNSREDIR "$@" >/dev/null 2>&1
             done
         done
     }
@@ -1597,12 +2626,14 @@ USER_POLICIES_EOF
         if [ -n "$port_redirect" ] && [ -n "$port_tproxy" ]; then
             for table in "$table_tproxy" "$table_redirect"; do
                 add_ipt_rule "$family" "$table" "$name_chain"
+                add_force_ipt_rule "$family" "$table" "${name_chain}_force"
                 add_prerouting "$family" "$table"
                 add_output "$family" "$table"
             done
         elif [ -z "$port_redirect" ] && [ -n "$port_tproxy" ]; then
             table="$table_tproxy"
             add_ipt_rule "$family" "$table" "$name_chain"
+            add_force_ipt_rule "$family" "$table" "${name_chain}_force"
             add_prerouting "$family" "$table"
             add_output "$family" "$table"
         elif [ -n "$port_redirect" ] && [ -z "$port_tproxy" ]; then
@@ -1621,14 +2652,14 @@ USER_POLICIES_EOF
 else
     [ -f "/tmp/xkeen_starting.lock" ] && exit 0
     touch "/tmp/xkeen_starting.lock"
-    . "/opt/sbin/.xkeen/01_info/03_info_cpu.sh"
-    status_file="/opt/lib/opkg/status"
+    . "$file_cpu"
     info_cpu
 
     fd_limit="$other_fd"
     [ "$architecture" = "arm64-v8a" ] && fd_limit="$arm64_fd"
     ulimit -SHn "$fd_limit"
 
+    export SSL_CERT_FILE="$file_ca"
     case "$name_client" in
         xray)
             export XRAY_LOCATION_CONFDIR="$directory_xray_config"
@@ -1658,12 +2689,25 @@ else
     fi
 fi
 EOL
-
+    sed -i '1,2!{/^[[:space:]]*#/d; /^[[:space:]]*$/d}' "$file_netfilter_hook"
     chmod 700 "$file_netfilter_hook"
+
+    # Schedule.d-хук: NDM вызывает scripts/schedule.d при start/stop расписаний
+    # (родительский контроль). Хук дёргает netfilter.d/proxy.sh, который
+    # ре-синхронизирует ipset deny-MAC из актуального hotspot API.
+    mkdir -p "$(dirname "$file_schedule_hook")" 2>/dev/null
+    cat > "$file_schedule_hook" <<'SCHEDULE_EOL'
+#!/bin/sh
+# XKeen: re-sync deny MAC ipset on schedule start/stop. Auto-generated. DO NOT EDIT!
+[ "$1" = "start" ] || [ "$1" = "stop" ] || exit 0
+[ -x /opt/etc/ndm/netfilter.d/proxy.sh ] && /opt/etc/ndm/netfilter.d/proxy.sh
+SCHEDULE_EOL
+    chmod 755 "$file_schedule_hook"
+
     sh "$file_netfilter_hook"
 }
 
-# Удаление правил Iptables
+# Удаление правил iptables
 clean_firewall() {
     [ -f "$file_netfilter_hook" ] && : > "$file_netfilter_hook"
 
@@ -1701,6 +2745,12 @@ clean_firewall() {
             "$family" -w -t "$table" -F "$out_chain" >/dev/null 2>&1
             "$family" -w -t "$table" -X "$out_chain" >/dev/null 2>&1
         fi
+
+        force_chain="${name_chain}_force"
+        if "$family" -w -t "$table" -nL "$force_chain" >/dev/null 2>&1; then
+            "$family" -w -t "$table" -F "$force_chain" >/dev/null 2>&1
+            "$family" -w -t "$table" -X "$force_chain" >/dev/null 2>&1
+        fi
     }
 
     for family in iptables ip6tables; do
@@ -1718,11 +2768,15 @@ clean_firewall() {
 
     # Очистка и удаление списков ipset
     if command -v ipset >/dev/null 2>&1; then
-        for set in geo_exclude geo_exclude6 user_exclude user_exclude6; do
+        for set in geo_override geo_override6 geo_exclude geo_exclude6 user_exclude user_exclude6 "$name_ipset_deny_mac"; do
             ipset flush "$set" >/dev/null 2>&1
             ipset destroy "$set" >/dev/null 2>&1
         done
     fi
+
+    # Schedule.d-hook идемпотентно перегенерируется в configure_firewall,
+    # на остановке убираем чтобы NDM не дёргал мёртвый netfilter.d/proxy.sh.
+    [ -f "$file_schedule_hook" ] && rm -f "$file_schedule_hook"
 }
 
 # Мониторинг файловых дескрипторов
@@ -1848,8 +2902,89 @@ info_health_binary() {
     fi
 }
 
+# Атомарный single-instance guard на cold_start. mkdir — POSIX-атомарен,
+# единственный надёжный lock в busybox-ash без flock. Закрывает гонку
+# повторного S05xkeen start от NDM (fs.d + init.d + reconnect-триггеры).
+# Flag-файл xkeen_coldstart.lock сохранён для совместимости с условиями
+# подавления логов в proxy_start/proxy_stop ("[ -f lock ] || log_info_router").
+# PID владельца записывает _set_coldstart_pid после `nohup cold_start &` —
+# текущий $$ это caller (S05xkeen start), который завершается сразу;
+# проверка живости должна идти по PID фонового cold_start ($!).
+_acquire_coldstart_guard() {
+    if mkdir "/tmp/xkeen_coldstart.lock.d" 2>/dev/null; then
+        touch "/tmp/xkeen_coldstart.lock"
+        return 0
+    fi
+    _gpid=$(cat "/tmp/xkeen_coldstart.lock.d/pid" 2>/dev/null)
+    if [ -n "$_gpid" ] && kill -0 "$_gpid" 2>/dev/null; then
+        return 1
+    fi
+    # Без PID файла — guard свежий (caller ещё не дошёл до _set_coldstart_pid).
+    # Не сбрасываем: иначе теряем защиту в окне между mkdir и записью PID.
+    [ -z "$_gpid" ] && return 1
+    # PID есть, но процесс мёртв → stale, перехват
+    rm -rf "/tmp/xkeen_coldstart.lock.d"
+    mkdir "/tmp/xkeen_coldstart.lock.d" 2>/dev/null || return 1
+    touch "/tmp/xkeen_coldstart.lock"
+    return 0
+}
+
+_set_coldstart_pid() {
+    [ -d "/tmp/xkeen_coldstart.lock.d" ] || return 0
+    echo "$1" > "/tmp/xkeen_coldstart.lock.d/pid"
+}
+
+_release_coldstart_guard() {
+    rm -rf "/tmp/xkeen_coldstart.lock.d"
+    rm -f "/tmp/xkeen_coldstart.lock"
+}
+
+# Защита от параллельного входа в proxy_start/proxy_stop из двух
+# триггеров (cold_start vs xkeen -restart, два S05xkeen start
+# подряд от NDM и т.п.). Второй конкурент тихо выходит.
+# rc=0  — захватили; rc=1 — реальный конкурент; rc=2 — re-entrant
+# (тот же процесс уже владеет mutex'ом, например proxy_start вложенно
+# вызывает proxy_stop при TProxy 443-конфликте — не релизим).
+_acquire_proxy_mutex() {
+    if mkdir "/tmp/xkeen_proxy.mutex.d" 2>/dev/null; then
+        echo $$ > "/tmp/xkeen_proxy.mutex.d/pid"
+        return 0
+    fi
+    _mpid=$(cat "/tmp/xkeen_proxy.mutex.d/pid" 2>/dev/null)
+    if [ "$_mpid" = "$$" ]; then
+        return 2
+    fi
+    if [ -n "$_mpid" ] && kill -0 "$_mpid" 2>/dev/null; then
+        return 1
+    fi
+    rm -rf "/tmp/xkeen_proxy.mutex.d"
+    mkdir "/tmp/xkeen_proxy.mutex.d" 2>/dev/null || return 1
+    echo $$ > "/tmp/xkeen_proxy.mutex.d/pid"
+    return 0
+}
+
+_release_proxy_mutex() {
+    rm -rf "/tmp/xkeen_proxy.mutex.d"
+}
+
+# Очистка при аварийной остановке прокси-клиента
+emergency_clear() {
+    rm -f "/tmp/xkeen_ready"
+    _release_coldstart_guard
+    cleanup_fd_monitor
+    clean_firewall
+}
+
 # Запуск прокси-клиента
 proxy_start() {
+    _acquire_proxy_mutex
+    _ps_mutex_rc=$?
+    if [ "$_ps_mutex_rc" -eq 1 ]; then
+        return 0
+    fi
+    if [ "$_ps_mutex_rc" -eq 0 ]; then
+        trap '_release_proxy_mutex; trap - INT TERM HUP' INT TERM HUP
+    fi
     start_manual="$1"
     if [ "$start_manual" = "on" ] || [ "$start_auto" = "on" ]; then
         _invalidate_inbounds_cache
@@ -1859,9 +2994,14 @@ proxy_start() {
         validate_xkeen_json
         check_policy_name_conflict
         check_xray_backups
-        validate_routing_mark
-        log_clean
         api_cache_init
+        policy_mark=$(get_policy_mark "$name_policy")
+        policy_mark_full=$(get_policy_mark "$name_policy_full")
+        user_policies=$(resolve_user_policies)
+        validate_entware_proxy_mark
+        validate_pbr_routing_mark
+        log_clean
+        sync_deny_mac_ipset
         process_user_ports
         process_custom_mark
         port_redirect=$(get_port_redirect)
@@ -1870,11 +3010,8 @@ proxy_start() {
         network_tproxy=$(get_network_tproxy)
         mode_proxy=$(get_mode_proxy)
         if [ "$mode_proxy" != "Other" ]; then
-            policy_mark=$(get_policy_mark)
 
             if [ -n "$policy_mark" ]; then
-                user_policies=$(resolve_user_policies)
-
                 if [ -n "$user_policies" ]; then
                     print_policy_info "yes" "yes"
                 else
@@ -1902,6 +3039,7 @@ proxy_start() {
             if ! proxy_status && { [ -n "$port_donor" ] || [ -n "$port_exclude" ] || [ "$mode_proxy" = "TProxy" ] || [ "$mode_proxy" = "Hybrid" ]; }; then
                 get_modules
             fi
+            configure_dscp_force_proxy
             if [ "$mode_proxy" = "TProxy" ]; then
                 keenetic_ssl="$(get_keenetic_port)" || {
                     proxy_stop
@@ -1916,19 +3054,22 @@ proxy_start() {
         fi
         if proxy_status; then
             echo -e "  Прокси-клиент уже ${green}запущен${reset}"
+            # Marker до configure_firewall: тот завершается `sh proxy.sh`,
+            # gate в хуке читает /tmp/xkeen_ready.
+            touch "/tmp/xkeen_ready"
             [ "$mode_proxy" != "Other" ] && configure_firewall
             if [ "$start_manual" = "on" ]; then
                 log_error_terminal "Не удалось запустить ${yellow}$name_client${reset}, так как он уже запущен"
             else
                 log_info_router "Прокси-клиент успешно запущен в режиме $mode_proxy"
-                rm -f "/tmp/xkeen_coldstart.lock"
+                _release_coldstart_guard
             fi
         else
             log_info_router "Инициирован запуск прокси-клиента"
             attempt=1
-            . "/opt/sbin/.xkeen/01_info/03_info_cpu.sh"
-            status_file="/opt/lib/opkg/status"
+            . "$file_cpu"
             info_cpu
+            export SSL_CERT_FILE="$file_ca"
             while [ "$attempt" -le "$start_attempts" ]; do
                 case "$name_client" in
                     xray)
@@ -1940,7 +3081,11 @@ proxy_start() {
                             nohup "$name_client" run >/dev/null 2>&1 &
                             unset fd_out
                         else
-                            "$name_client" run &
+                            if [ "$start_verbose" = "on" ]; then
+                                "$name_client" run &
+                            else
+                                "$name_client" run >/dev/null 2>&1 &
+                            fi
                         fi
                     ;;
                     mihomo)
@@ -1950,7 +3095,11 @@ proxy_start() {
                             nohup "$name_client" >/dev/null 2>&1 &
                             unset fd_out
                         else
-                            "$name_client" &
+                            if [ "$start_verbose" = "on" ]; then
+                                "$name_client" &
+                            else
+                                "$name_client" >/dev/null 2>&1 &
+                            fi
                         fi
                         ;;
                     sing-box)
@@ -1972,6 +3121,8 @@ proxy_start() {
                 done
                 unset _probe_attempt
                 if proxy_status; then
+                    # См. alive-branch: marker до configure_firewall.
+                    touch "/tmp/xkeen_ready"
                     [ "$mode_proxy" != "Other" ] && configure_firewall
                     _pids=""
                     [ "$iptables_supported" = "true" ] && [ -f "$ru_exclude_ipv4" ] && { load_ipset geo_exclude "$ru_exclude_ipv4" inet & _pids="$_pids $!"; }
@@ -1980,6 +3131,22 @@ proxy_start() {
                     [ -n "$_pids" ] && wait $_pids
                     unset _pids
                     echo -e "  Прокси-клиент ${green}запущен${reset} в режиме ${light_blue}${mode_proxy}${reset}"
+                    (
+                        # Даём ядру прокси время полностью инициализироваться
+                        # Это защищает от ситуаций, когда xray/mihomo
+                        # успевает создать PID, но затем аварийно завершается,
+                        # например, из-за битой конфигурации
+                        sleep 3
+
+                        if ! proxy_status; then
+                            echo
+                            echo -e "  Прокси-клиент ${red}аварийно завершился${reset}"
+                            echo -e "  ${green}Выполняется очистка${reset} правил прозрачного проксирования"
+                            log_error_router "Прокси-клиент аварийно завершился после запуска"
+                            emergency_clear
+                            printf '\n~ # '
+                        fi
+                    ) &
                     if [ -n "$api_policy_json" ]; then
                         if echo "$api_policy_json" | jq --arg policy "$name_policy" -e 'any(.[]; .description | ascii_downcase == $policy)' > /dev/null; then
                             if [ -e "/tmp/noinet" ]; then
@@ -1991,12 +3158,16 @@ proxy_start() {
                     fi
                     [ "$mode_proxy" = "Other" ] && echo -e "  Функция прозрачного прокси ${red}не активна${reset}. Направляйте соединения на ${yellow}${name_client}${reset} вручную"
                     log_info_router "Прокси-клиент успешно запущен в режиме $mode_proxy"
-                    rm -f "/tmp/xkeen_coldstart.lock"
+                    _release_coldstart_guard
                     if [ "$check_fd" = "on" ]; then
                         cleanup_fd_monitor
                         monitor_fd &
                         echo $! > "$file_pid_fd"
                         log_info_router "Запущен контроль файловых дескрипторов $name_client"
+                    fi
+                    if [ "$_ps_mutex_rc" -eq 0 ]; then
+                        _release_proxy_mutex
+                        trap - INT TERM HUP
                     fi
                     return 0
                 fi
@@ -2004,14 +3175,60 @@ proxy_start() {
             done
             echo -e "  ${red}Не удалось запустить${reset} прокси-клиент"
             log_error_terminal "Не удалось запустить прокси-клиент"
+            _release_coldstart_guard
         fi
     else
         clean_firewall
     fi
+    if [ "$_ps_mutex_rc" -eq 0 ]; then
+        _release_proxy_mutex
+        trap - INT TERM HUP
+    fi
+}
+
+# Активная проба готовности окружения вместо sleep $start_delay.
+# Ждём ndmc, default route и insmod-ability xt_TPROXY (deps ndm
+# подгружает асинхронно уже после ndmc-ready). $start_delay сохранён
+# как safety cap (FAQ #12).
+wait_for_ready() {
+    _max=$(( ${start_delay:-60} * 2 ))
+    _attempt=0
+    _probe_ko=$(find_module_path "xt_TPROXY.ko")
+
+    while [ "$_attempt" -lt "$_max" ]; do
+        if ip route show default 2>/dev/null | grep -q '^default'; then
+            # Проверка готовности API политик и модуля xt_TPROXY
+            api_policy_json=$(curl_api "${url_server}/${url_policy}" 2>/dev/null)
+            case "$api_policy_json" in
+                ""|"{}")
+                    ;;
+                \{*)
+                    if [ -z "$_probe_ko" ] \
+                       || grep -q '^xt_TPROXY ' /proc/modules 2>/dev/null \
+                       || insmod "$_probe_ko" >/dev/null 2>&1
+                    then
+                        return 0
+                    fi
+                    ;;
+            esac
+        fi
+        usleep 500000
+        _attempt=$((_attempt + 1))
+    done
+    return 0
 }
 
 # Остановка прокси-клиента
 proxy_stop() {
+    _acquire_proxy_mutex
+    _pstop_mutex_rc=$?
+    if [ "$_pstop_mutex_rc" -eq 1 ]; then
+        return 0
+    fi
+    if [ "$_pstop_mutex_rc" -eq 0 ]; then
+        trap '_release_proxy_mutex; trap - INT TERM HUP' INT TERM HUP
+    fi
+    rm -f "/tmp/xkeen_ready"
     if ! proxy_status; then
         echo -e "  Прокси-клиент ${red}не запущен${reset}"
         cleanup_fd_monitor
@@ -2036,13 +3253,21 @@ proxy_stop() {
             if ! proxy_status; then
                 echo -e "  Прокси-клиент ${red}остановлен${reset}"
                 [ -f "/tmp/xkeen_coldstart.lock" ] || log_info_router "Прокси-клиент успешно остановлен"
-                rm -f "/tmp/xkeen_coldstart.lock"
+                _release_coldstart_guard
+                if [ "$_pstop_mutex_rc" -eq 0 ]; then
+                    _release_proxy_mutex
+                    trap - INT TERM HUP
+                fi
                 return 0
             fi
             attempt=$((attempt + 1))
         done
         echo -e "  Прокси-клиент ${red}не удалось остановить${reset}"
         log_error_terminal "Не удалось остановить прокси-клиент"
+    fi
+    if [ "$_pstop_mutex_rc" -eq 0 ]; then
+        _release_proxy_mutex
+        trap - INT TERM HUP
     fi
 }
 
@@ -2053,9 +3278,14 @@ case "$1" in
         ipset create ext_exclude6 hash:ip family inet6 -exist
         if [ -z "$2" ]; then
             [ "$start_auto" != "on" ] && exit 0
+            # Атомарный guard ДО spawn — повторный S05xkeen start от
+            # NDM (fs.d / init.d / reconnect) увидит каталог и выйдет.
+            _acquire_coldstart_guard || exit 0
             log_info_router "Подготовка к запуску прокси-клиента"
-            nohup sh -c "sleep $start_delay && $0 restart" >/dev/null 2>&1 &
-            touch "/tmp/xkeen_coldstart.lock"
+            nohup "$0" cold_start >/dev/null 2>&1 &
+            # PID фонового cold_start — caller ($$) умрёт через exit 0,
+            # а живость guard'а проверяется именно по этому PID.
+            _set_coldstart_pid "$!"
             exit 0
         fi
         proxy_start "$2"
@@ -2073,7 +3303,27 @@ case "$1" in
             echo -e "  Прокси-клиент ${red}не запущен${reset}"
         fi
         ;;
+    dscp)
+        if [ "$dscp_enable" != "off" ]; then
+            echo
+            print_dscp_force_proxy_status
+        fi
+        ;;
     restart) proxy_stop; proxy_start "$2" ;;
+    cold_start)
+        # Подстраховка: переписываем PID guard'а на свой ($$) на случай,
+        # если caller-S05xkeen умер до того, как успел _set_coldstart_pid "$!".
+        _set_coldstart_pid "$$"
+        # Гарантированная задержка перед попыткой запуска прокси-клиента
+        if [ -n "$init_delay" ] && [ "$init_delay" -gt 0 ] 2>/dev/null; then
+            log_info_router "Ожидание перед проверкой готовности к запуску XKeen (${init_delay} сек...)"
+            sleep "$init_delay"
+        fi
+        # Re-spawn в чистый S05xkeen: sh-функции (wait_for_ready) не
+        # наследуются через nohup sh -c, поэтому пробу зовём отсюда.
+        wait_for_ready
+        proxy_start ""
+        ;;
     *) echo -e "  Команды: ${green}start${reset} | ${red}stop${reset} | ${yellow}restart${reset} | status" ;;
 esac
 

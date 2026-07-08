@@ -1,4 +1,13 @@
-# XKeen 1.1.3.9
+# XKeen 2.0
+
+[![CodeFactor](https://www.codefactor.io/repository/github/jameszerox/xkeen/badge)](https://www.codefactor.io/repository/github/jameszerox/xkeen) [![Github All Releases](https://img.shields.io/github/downloads/jameszeroX/XKeen/total.svg)](https://github.com/jameszeroX/XKeen/releases) [![License](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./docs/xkeen-light.png">
+    <img alt="XKeen" src="./docs/xkeen-dark.png">
+  </picture>
+</p>
 
 > **XKeen** — утилита для выборочной маршрутизации сетевого трафика через прокси‑движки **Xray** и **Mihomo** на роутерах **Keenetic**/**Netcraze**.  
 > Позволяет прозрачно направлять TCP/UDP‑трафик только выбранных клиентов, не затрагивая остальную сеть.
@@ -10,7 +19,7 @@
 - Выборочная маршрутизация для клиентов в политике доступа в интернет
 - Сохранение прямого выхода в интернет для остальных клиентов
 - Маршрутизация без политики для всех клиентов роутера
-- Поддержка режимов **TProxy**, **Mixed**, **Redirect**, **Other** (socks5/http)
+- Поддержка режимов **TProxy**, **Hybrid**, **Redirect**, **Other** (socks5/http)
 - Прозрачное проксирование **TCP** и **UDP**
 - Поддержка ядер-проксирования **Xray** и **Mihomo**
 - Совместимость с **KeeneticOS 5+**
@@ -37,21 +46,28 @@ XKeen работает полностью на стороне роутера, н
 
 ## Ключевые изменения форка
 
-### Исправлено
-
-- автозапуск XKeen
-- сняты ограничения на количество используемых портов
-
 ### Добавлено
 
 - поддержка **KeeneticOS 5+**
 - управление IPv6
 - поддержка ядра **Mihomo**
 - быстрое переключение Xray / Mihomo
-- контроль [файловых дескрипторов](https://github.com/jameszeroX/XKeen/blob/main/configuration.md#контроль-файловых-дескрипторов)
-- [внешние списки](https://github.com/jameszeroX/XKeen/blob/main/configuration.md#внешние-списки-портов-и-ip) IP и портов
-- [OffLine](https://github.com/jameszeroX/XKeen/blob/main/configuration.md#offline-установка)‑установка
-- [Self-Hosted](https://github.com/jameszeroX/XKeen/blob/main/configuration.md#self-hosted-прокси-для-загрузки)-прокси для загрузки компонентов
+- контроль [файловых дескрипторов](https://github.com/jameszeroX/XKeen/wiki/Configuration#контроль-файловых-дескрипторов)
+- [внешние списки](https://github.com/jameszeroX/XKeen/wiki/Configuration#внешние-списки-портов-и-ip) IP и портов
+- [OffLine](https://github.com/jameszeroX/XKeen/wiki/Configuration#offline-установка)‑установка
+- [Self-Hosted](https://github.com/jameszeroX/XKeen/wiki/Configuration#self-hosted-прокси-для-загрузки)-прокси для загрузки компонентов
+- работа с [пользовательскими политиками](https://github.com/jameszeroX/XKeen/wiki/Configuration#пользовательские-политики)
+- возможность [проксирования DNS](https://github.com/jameszeroX/XKeen/wiki/Configuration#Проксирование-dns)
+- возможность [работы с IPSET](https://github.com/jameszeroX/XKeen/wiki/Configuration#описание-работы-ipset-в-xkeen)
+- поддержка [DSCP-меток QoS](https://jameszero.net/4509.htm)
+- возможность ([проксирования трафика Entware](https://github.com/jameszeroX/XKeen/wiki/Configuration#проксирование-трафика-entware))
+- strict PBR-проверка `mark` / `routing-mark` для исходящих подключений Xray/Mihomo через выбранную политику Keenetic
+- Совместимость с родительским контролем и политикой "Без доступа в интернет"
+
+### Исправлено
+
+- автозапуск XKeen
+- сняты ограничения на количество используемых портов
 
 ### Удалено
 
@@ -59,33 +75,17 @@ XKeen работает полностью на стороне роутера, н
 - неиспользуемые конфигурационные файлы
 - устаревшие параметры запуска и задачи планировщика
 
----
-
-### Подробное [описание изменений](https://github.com/jameszeroX/XKeen/blob/main/forkinfo.md)
+### [Подробное описание изменений](https://github.com/jameszeroX/XKeen/wiki/Forkinfo)
 
 ---
 
-Список параметров запуска XKeen доступен в справке:
-```bash
-xkeen -h
-```
-
----
-
-## Порядок установки
-
-Требуется роутер **Keenetic**/**Netcraze** с предварительно установленной средой Entware и компонентом `Модули ядра подсистемы Netfilter`
-
-```bash
-opkg update && opkg upgrade && opkg install curl tar && cd /tmp
-sh -c "$(curl -sSL https://raw.githubusercontent.com/jameszeroX/XKeen/main/install.sh)"
-```
+## [Порядок установки](https://github.com/jameszeroX/XKeen/wiki/Порядок-установки)
 
 ---
 
 ## Поддержка проекта
 
-Форк XKeen, как и оригинал, совершено бесплатен и не имеет каких либо ограничений по использованию. Надеюсь, доработки XKeen, многие из которых я сделал по Вашим просьбам, оказались полезны, так же, как и мои сообщения в [телеграм-чате](https://t.me/+8Cvh7oVf6cE0MWRi). Для меня очень важно понимать, что труд и время потрачены не зря. Буду благодарен за любую Вашу поддержку на развитие проекта:
+Форк XKeen, как и оригинал, совершено бесплатен и не имеет каких либо ограничений по использованию. Надеюсь, доработки XKeen, многие из которых я сделал по Вашим просьбам, оказались полезны, так же, как и мои сообщения в [телеграм-чате](https://t.me/+8Cvh7oVf6cE0MWRi). Для меня очень важно понимать, что труд и время потрачены не зря. Буду благодарен за любую Вашу поддержку на кофе для развития проекта:
 
 - [CloudTips](https://pay.cloudtips.ru/p/7edb30ec)
 - [ЮMoney](https://yoomoney.ru/to/41001350776240)
@@ -113,9 +113,9 @@ sh -c "$(curl -sSL https://raw.githubusercontent.com/jameszeroX/XKeen/main/insta
 
 ## Источники и ссылки
 
-- Origin XKeen — https://github.com/Skrill0/XKeen
+- XKeen — https://github.com/Skrill0/XKeen (оригинальный проект, с которого всё началось)
 - Xray-core — https://github.com/XTLS/Xray-core
 - Mihomo — https://github.com/MetaCubeX/mihomo
 - Yq — https://github.com/mikefarah/yq
-- FAQ — https://jameszero.net/faq-xkeen.htm
+- FAQ — https://github.com/jameszeroX/XKeen/wiki/FAQ
 - Telegram‑чат — https://t.me/+8Cvh7oVf6cE0MWRi

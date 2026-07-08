@@ -1,0 +1,22 @@
+.claude
+graphify-out
+done
+src/graphify
+src/output
+
+# Артефакты сборки (CI-генерируемые)
+*.tar.gz
+*.tar
+
+# Явное исключение для Beta-канала
+!test/xkeen.tar.gz
+!test/xkeen.tar
+
+# Локальные release-notes (не для коммита в PR)
+docs/release-notes/
+
+# MkDocs build artifacts
+/site/
+/site_src/
+.venv/
+__pycache__/

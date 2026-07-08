@@ -51,11 +51,11 @@ register_yq_status() {
 }
 
 add_mihomo_config() {
-    if [ -f $install_dir/mihomo ]; then
+    if [ -f "$install_dir/mihomo" ]; then
         if [ -f "$mihomo_conf_dir/config.yaml" ]; then
             return 0
-        elif [ ! -d $mihomo_conf_dir ]; then
-            mkdir $mihomo_conf_dir
+        elif [ ! -d "$mihomo_conf_dir" ]; then
+            mkdir "$mihomo_conf_dir"
         fi
             cat << EOF > "$mihomo_conf_dir/config.yaml"
 tproxy-port: 1181

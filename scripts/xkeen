@@ -78,9 +78,9 @@ get_state_arg() {
 # Импортируем модули
 . "$script_dir/.xkeen/import.sh"
 
-# Маркер /tmp/toff отключает curl_timeout — снимаем при прерывании
+# Маркер /tmp/toff отключает таймаут curl — снимаем при прерывании
 trap 'rm -f /tmp/toff; exit 1' INT TERM
-	
+
 xkeen_info() {
     # Проверяем версию XKeen
     info_version_xkeen
@@ -107,20 +107,18 @@ xkeen_set_info() {
 
     # Проверяем статус автообновления
     info_cron
-
-    # Проверяем версию Xray
-    info_version_xray
-
-    # Проверяем версию Mihomo и Yq
-    info_version_mihomo
-    info_version_yq
 }
+
+# Проверяем запущен ли прокси-клиент
+is_proxy_running() { pidof xray >/dev/null 2>&1 || pidof mihomo >/dev/null 2>&1; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
 
         -i|-install)    # Запуск полного цикла установки
+            info_firmware
             test_connection
+            check_health
             test_entware
             test_github
             sleep 2
@@ -129,16 +127,14 @@ while [ $# -gt 0 ]; do
             echo
             check_keen_mode
             if [ -n "$keen_mode" ]; then
-            echo -e "  ${red}Ошибка${reset}: Установка XKeen возможна только на Keenetic в режиме ${green}роутера${reset}"
+                echo -e "  ${red}Ошибка${reset}: Установка XKeen возможна только на Keenetic в режиме ${green}роутера${reset}"
                 exit 1
             fi
 
             echo -e "  Запуск полного цикла установки ${yellow}XKeen${reset}"
 
             init_directories
-            xkeen_info
             xkeen_set_info
-            info_4g
             logs_cpu_info_console
 
             case "$architecture" in
@@ -151,23 +147,66 @@ while [ $# -gt 0 ]; do
 
             choice_add_proxy_cores
 
-           if [ "$xray_installed" != "installed" ] && [ "$mihomo_installed" != "installed" ] &&
-              [ "$add_xray" = "false" ] && [ "$add_mihomo" = "false" ]; then
-               echo -e "  ${red}Невозможно установить${reset} XKeen без ядра проксирования"
-               exit 1
-           fi
+            if [ "$add_xray" = "true" ] && [ "$xray_installed" != "installed" ]; then
+                check_free_space xray || add_xray="false"
+            fi
 
             if [ "$add_xray" = "true" ]; then
                 smart_clear
-                echo
                 download_xray
             else
                 command -v xray >/dev/null 2>&1 || bypass_xray="true"
             fi
 
             if [ -z "$bypass_xray" ]; then
-                install_xray
+                if [ -f "$install_dir/xray" ]; then
+                    chmod +x "$install_dir/xray" 2>/dev/null
+                else
+                    if ! install_xray; then
+                        bypass_xray="true"
+                    fi
+                fi
                 info_xray
+            fi
+
+            if [ "$xray_installed" = "installed" ]; then
+                smart_clear
+                echo
+                xray_conf_install
+            fi
+
+            if [ "$add_mihomo" = "true" ] && [ "$mihomo_installed" != "installed" ]; then
+                check_free_space mihomo || add_mihomo="false"
+            fi
+
+            if [ "$add_mihomo" = "true" ]; then
+                smart_clear
+                if ! download_mihomo; then
+                    bypass_mihomo="true"
+                fi
+            else
+                command -v mihomo >/dev/null 2>&1 || bypass_mihomo="true"
+            fi
+
+            if [ -z "$bypass_mihomo" ]; then
+                if [ -f "$install_dir/mihomo" ]; then
+                    chmod +x "$install_dir/mihomo" 2>/dev/null
+                else
+                    if ! install_mihomo; then
+                        bypass_mihomo="true"
+                    fi
+                fi
+                info_mihomo
+            fi
+
+            if [ "$mihomo_installed" = "installed" ]; then
+                add_mihomo_config
+            fi
+
+            if [ "$mihomo_installed" != "installed" ] && [ "$xray_installed" != "installed" ]; then
+                echo
+                echo -e "  ${red}Ошибка${reset}: Установка прервана. Не установлено ни одного ядра проксирования (Xray или Mihomo)"
+                exit 1
             fi
 
             if [ "$xray_installed" = "installed" ]; then
@@ -186,75 +225,46 @@ while [ $# -gt 0 ]; do
                 sleep 2
             fi
 
+            if [ "$xray_installed" = "installed" ] || [ "$mihomo_installed" = "installed" ]; then
                 smart_clear
                 # Устанавливаем GeoIPSET
                 install_geoipset init
                 sleep 2
+            fi
 
-                if [ "$bypass_cron_geosite" = "false" ] || [ "$bypass_cron_geoip" = "false" ] || [ "$bypass_cron_geoipset" = "false" ]; then
-                    smart_clear
-                    # Настраиваем автоматические обновления
-                    info_cron
-                    choice_update_cron
-                    update_cron_geofile_task
-                    smart_clear
-                    choice_cron_time
-                    install_cron
-                    sleep 2
-                fi
+            if [ "$bypass_cron_geosite" = "false" ] || [ "$bypass_cron_geoip" = "false" ] || [ "$bypass_cron_geoipset" = "false" ]; then
+                smart_clear
+                # Настраиваем автоматические обновления
+                choice_update_cron
+                update_cron_geofile_task
+                [ "$choice_geofile_cron_select" = "true" ] && smart_clear
+                choice_cron_time
+                install_cron
+                sleep 2
+            fi
 
-                if [ "$xray_installed" = "installed" ]; then
-                    smart_clear
-                    echo
-                    install_configs
-                fi
-
-                # Создаем init для cron
-                "$initd_dir/S05crond" stop >/dev/null 2>&1
-                [ -e "$initd_dir/S05crond" ] && rm -f "$initd_dir/S05crond"
-                register_cron_initd
-                "$initd_dir/S05crond" start >/dev/null 2>&1
+            # Создаем init для cron
+            "$initd_dir/S05crond" stop >/dev/null 2>&1
+            [ -e "$initd_dir/S05crond" ] && rm -f "$initd_dir/S05crond"
+            register_cron_initd
+            "$initd_dir/S05crond" start >/dev/null 2>&1
 
             if [ -z "$bypass_xray" ]; then
-                info_version_xray
                 delete_register_xray
-
+                echo
                 echo -e "  Выполняется регистрация ${yellow}Xray${reset}"
                 register_xray_list
                 logs_register_xray_list_info_console
-
                 register_xray_control
                 logs_register_xray_control_info_console
-
                 register_xray_status
                 logs_register_xray_status_info_console
                 sleep 2
             fi
 
-            if [ "$add_mihomo" = "true" ]; then
-                smart_clear
-                echo
-                if ! download_mihomo; then
-                    bypass_mihomo="true"
-                fi
-            else
-                command -v mihomo >/dev/null 2>&1 || bypass_mihomo="true"
-            fi
-
             if [ -z "$bypass_mihomo" ]; then
-                install_mihomo
-                info_mihomo
-            fi
-
-            if [ "$mihomo_installed" = "installed" ]; then
-                add_mihomo_config
-            fi
-
-            if [ -z "$bypass_mihomo" ]; then
-                info_version_mihomo
-                info_version_yq
-
                 delete_register_mihomo
+                delete_register_yq
                 echo
                 echo -e "  Выполняется регистрация ${yellow}Mihomo${reset}"
                 register_mihomo_list
@@ -272,23 +282,14 @@ while [ $# -gt 0 ]; do
                 sleep 2
             fi
 
-            if [ "$mihomo_installed" != "installed" ] && [ "$xray_installed" != "installed" ]; then
-                echo
-                echo -e "  ${red}Ошибка${reset}: Установка прервана. Не установлено ни одного ядра проксирования (Xray или Mihomo)"
-                exit 1
-            fi
-
             if [ "$xray_installed" = "installed" ] || [ "$mihomo_installed" = "installed" ]; then
                 delete_register_xkeen
-                smart_clear
                 echo
                 echo -e "  Выполняется регистрация ${yellow}XKeen${reset}"
                 register_xkeen_list
                 logs_register_xkeen_list_info_console
-
                 register_xkeen_control
                 logs_register_xkeen_control_info_console
-
                 register_xkeen_status
                 logs_register_xkeen_status_info_console
 
@@ -315,11 +316,12 @@ while [ $# -gt 0 ]; do
 
             add_chmod_init
 
-            if pidof xray >/dev/null || pidof mihomo >/dev/null ; then
+            if is_proxy_running; then
                 "$initd_file" restart on >/dev/null 2>&1
             fi
 
             # Удаляем временные файлы
+            echo
             delete_tmp
             sleep 2
 
@@ -365,6 +367,7 @@ while [ $# -gt 0 ]; do
 
 
         -io)    # Установка XKeen OffLine
+            info_firmware
             smart_clear
             echo
             check_keen_mode
@@ -409,7 +412,7 @@ while [ $# -gt 0 ]; do
             fi
 
             if [ -f "$install_dir/xray" ]; then
-                install_configs
+                xray_conf_install
 
                 if [ ! -d "$geo_dir" ]; then
                     mkdir -p "$geo_dir"
@@ -418,7 +421,6 @@ while [ $# -gt 0 ]; do
                 smart_clear
                 delete_register_xray
                 info_xray
-                info_version_xray
                 echo
                 echo -e "  Выполняется регистрация ${yellow}Xray${reset}"
                 register_xray_list
@@ -432,9 +434,8 @@ while [ $# -gt 0 ]; do
             if [ -f "$install_dir/mihomo" ]; then
                 add_mihomo_config
                 delete_register_mihomo
+                delete_register_yq
                 info_mihomo
-                info_version_mihomo
-                info_version_yq
                 echo
                 echo -e "  Выполняется регистрация ${yellow}Mihomo${reset}"
                 register_mihomo_list
@@ -475,11 +476,12 @@ while [ $# -gt 0 ]; do
             choice_autostart_xkeen
             add_chmod_init
 
-            if pidof xray >/dev/null || pidof mihomo >/dev/null ; then
+            if is_proxy_running; then
                 "$initd_file" restart on >/dev/null 2>&1
             fi
 
             # Удаляем временные файлы
+            echo
             delete_tmp
             sleep 2
 
@@ -505,6 +507,7 @@ while [ $# -gt 0 ]; do
 
         -ug)    # Обновление баз GeoFile/GeoIPSET
             test_connection
+            check_health
             test_github
             sleep 2
 
@@ -519,7 +522,8 @@ while [ $# -gt 0 ]; do
                 [ "$update_zkeen_geosite" = "true" ] || \
                 [ "$update_refilter_geoip" = "true" ] || \
                 [ "$update_v2fly_geoip" = "true" ] || \
-                [ "$update_zkeenip_geoip" = "true" ]; then
+                [ "$update_zkeenip_geoip" = "true" ] || \
+                [ -f "$ru_exclude_ipv4" ]; then
 
                 echo
                 install_geosite
@@ -539,6 +543,8 @@ while [ $# -gt 0 ]; do
 
         -uk)    # Обновление XKeen
             test_connection
+            check_health	
+            test_entware
             test_github
             sleep 2
 
@@ -570,12 +576,18 @@ while [ $# -gt 0 ]; do
 
 
         -uk_post_update)
-            . "/opt/sbin/.xkeen/import.sh"
+            . "$xkeen_dir/import.sh"
             init_directories
-            xkeen_info
             xkeen_set_info
-            info_packages
-            install_packages
+            new_features
+            register_cron_initd
+            migrate_ports_from_initd
+            register_xkeen_initd
+            create_xkeen_cfg
+            choice_cancel_cron_select=true
+            update_cron_geofile_task
+            smart_clear
+            echo
 
             echo -e "  Выполняется отмена регистрации предыдущей версии ${yellow}XKeen${reset}"
             delete_register_xkeen
@@ -591,49 +603,46 @@ while [ $# -gt 0 ]; do
             register_xkeen_status
             logs_register_xkeen_status_info_console
 
-            register_cron_initd
-            migrate_ports_from_initd
-            register_xkeen_initd
-            create_xkeen_cfg
-            choice_cancel_cron_select=true
-            update_cron_geofile_task
-            fixed_register_packages
-
-            if pidof xray >/dev/null || pidof mihomo >/dev/null ; then
+            if is_proxy_running; then
                 "$initd_file" restart on >/dev/null 2>&1
             fi
 
+            fixed_register_packages
+            echo
             delete_tmp
 
             echo -e "  Обновление XKeen ${green}выполнено${reset}"
+            version_xkeen
         ;;
 
 
         -ux)    # Обновление или установка ядра Xray
+            check_free_space xray || exit 1
             test_connection
+            check_health
             test_github
-            sleep 2
-
-            . "/opt/sbin/.xkeen/01_info/03_info_cpu.sh"
-            status_file="/opt/lib/opkg/status"
             info_cpu
+            sleep 2
             smart_clear
-            info_4g
             info_xray
-            info_version_xray
 
-            [ "$xray_installed" = "installed" ] && echo -e "  В роутере установлен Xray версии ${yellow}$xray_current_version${reset}" && echo
+            [ "$xray_installed" = "installed" ] && echo && echo -e "  В роутере установлен Xray версии ${yellow}$xray_current_version${reset}"
             download_xray
 
             if [ -z "$bypass_xray" ]; then
-                install_xray
+                if ! install_xray; then
+                    echo
+                    delete_tmp
+                    echo -e "  ${red}Ошибка${reset}: Установка Xray не выполнена"
+                    exit 1
+                fi
 
                 if [ "$xray_installed" = "installed" ]; then
                     echo -e "  Выполняется отмена регистрации предыдущей версии ${yellow}Xray${reset}"
                     delete_register_xray
                     logs_delete_register_xray_info_console
 
-                    info_version_xray
+                    info_xray
                     echo -e "  Выполняется регистрация новой версии ${yellow}Xray${reset}"
                     register_xray_list
                     logs_register_xray_list_info_console
@@ -651,10 +660,10 @@ while [ $# -gt 0 ]; do
                     echo -e "  Обновление ядра Xray ${green}выполнено${reset}"
                 else
                     xray_installed="installed"
-                    info_version_xray
+                    info_xray
 
                     if [ -f "$install_dir/xray" ]; then
-                        install_configs
+                        xray_conf_install
         
                         if [ ! -d "$geo_dir" ]; then
                             mkdir -p "$geo_dir"
@@ -678,46 +687,51 @@ while [ $# -gt 0 ]; do
             fi
 
             fixed_register_packages
+            echo
             delete_tmp
         ;;
 
 
         -um)    # Обновление или установка ядра Mihomo
+            check_free_space mihomo || exit 1
             test_connection
+            check_health
             test_github
-            sleep 2
-
-            . "/opt/sbin/.xkeen/01_info/03_info_cpu.sh"
-            status_file="/opt/lib/opkg/status"
             info_cpu
+            sleep 2
             smart_clear
-            info_4g
             info_mihomo
-            info_version_mihomo
             mihomo_was_installed="$mihomo_installed"
 
-            [ "$mihomo_installed" = "installed" ] && echo -e "  В роутере установлен Mihomo версии ${yellow}$mihomo_current_version${reset}" && echo
+            [ "$mihomo_installed" = "installed" ] && echo && echo -e "  В роутере установлен Mihomo версии ${yellow}$mihomo_current_version${reset}"
             if ! download_mihomo; then
+                echo
                 delete_tmp
                 exit 1
             fi
 
             if [ -z "$bypass_mihomo" ]; then
-                install_mihomo
+                if ! install_mihomo; then
+                    echo
+                    delete_tmp
+                    echo -e "  ${red}Ошибка${reset}: Установка Mihomo не выполнена. См. сообщения выше"
+                    exit 1
+                fi
                 info_mihomo
 
                 if [ "$mihomo_installed" != "installed" ]; then
+                    echo
                     delete_tmp
-                    echo -e "  ${red}Ошибка${reset}: Mihomo не установлен, так как отсутствует обязательный Yq"
+                    echo -e "  ${red}Ошибка${reset}: Mihomo не установлен (отсутствует обязательный Yq или бинарник Mihomo)"
                     exit 1
                 elif [ "$mihomo_was_installed" = "installed" ]; then
                     echo -e "  Выполняется отмена регистрации предыдущей версии ${yellow}Mihomo${reset}"
                     delete_register_mihomo
+                    delete_register_yq
                     logs_delete_register_mihomo_info_console
                     logs_delete_register_yq_info_console
 
-                    info_version_mihomo
-                    info_version_yq
+                    info_mihomo
                     echo -e "  Выполняется регистрация новой версии ${yellow}Mihomo${reset}"
                     register_mihomo_list
                     logs_register_mihomo_list_info_console
@@ -738,10 +752,10 @@ while [ $# -gt 0 ]; do
                     echo
                     echo -e "  Обновление ядра ${yellow}Mihomo${reset} ${green}выполнено${reset}"
                 else
-                    info_version_mihomo
-                    info_version_yq
+                    info_mihomo
                     add_mihomo_config
                     delete_register_mihomo
+                    delete_register_yq
                     echo
                     echo -e "  Выполняется регистрация ${yellow}Mihomo${reset}"
                     register_mihomo_list
@@ -764,6 +778,37 @@ while [ $# -gt 0 ]; do
             fi
 
             fixed_register_packages
+            echo
+            delete_tmp
+        ;;
+
+
+        -uy)    # Обновление или установка Yq
+            test_connection
+            check_health
+            test_github
+            info_cpu
+            sleep 2
+            smart_clear
+            download_yq
+            info_version_yq
+
+            delete_register_yq
+            logs_delete_register_yq_info_console
+            info_version_yq
+            echo -e "  Выполняется регистрация новой версии ${yellow}Yq${reset}"
+            register_yq_list
+            logs_register_yq_list_info_console
+            register_yq_control
+            logs_register_yq_control_info_console
+            register_yq_status
+            logs_register_yq_status_info_console
+            sleep 2
+            echo
+            echo -e "  Установка ${yellow}Yq${reset} ${green}выполнена${reset}"
+
+            fixed_register_packages
+            echo
             delete_tmp
         ;;
 
@@ -771,9 +816,11 @@ while [ $# -gt 0 ]; do
         -ugc)    # Создать или изменить существующюю задачу автообновления баз GeoFile/GeoIPSET
             info_cron
             smart_clear
+            echo
             echo -e "  Создание или изменение задачи автообновления баз ${yellow}GeoFile/GeoIPSET${reset}"
             choice_update_cron
             update_cron_geofile_task
+            [ "$choice_geofile_cron_select" = "true" ] && smart_clear
             choice_cron_time
             install_cron
             delete_tmp
@@ -800,21 +847,18 @@ while [ $# -gt 0 ]; do
 
 
         -dgc)    # Удалить задачу автообновления баз GeoFile/GeoIPSET
+            info_cron
             smart_clear
             echo
             choice_for_remove="задачу автообновления баз GeoFile/GeoIPSET"
             choice_remove
-
-            info_cron
-
             smart_clear
             echo
             echo -e "  Удаление задачи автообновления баз ${yellow}GeoFile/GeoIPSET${reset}"
-
             delete_cron_geofile
             logs_delete_cron_geofile_info_console
+            echo
             delete_tmp
-
             echo -e "  Удаление задачи автообновления баз GeoFile/GeoIPSET ${green}выполнено${reset}"
         ;;
 
@@ -844,7 +888,7 @@ while [ $# -gt 0 ]; do
         ;;
 
 
-        -dm)    # Удалить Mihomo
+        -dm)    # Удалить Mihomo и Yq
             smart_clear
             echo
             choice_for_remove="Mihomo"
@@ -875,6 +919,7 @@ while [ $# -gt 0 ]; do
             echo
             echo -e "  Удаление ${yellow}XKeen${reset}"
             opkg remove xkeen
+            echo
             delete_tmp
 
             smart_clear
@@ -887,8 +932,8 @@ while [ $# -gt 0 ]; do
             echo
             echo -e "  Установить ${yellow}XKeen${reset} заново можно командами:"
             echo
-            echo -e "  ${green}opkg update && opkg upgrade && opkg install curl tar && cd /tmp${reset}"
-            echo -e "  ${green}sh -c "$(curl -sSL https://raw.githubusercontent.com/jameszeroX/XKeen/main/install.sh)"${reset}"
+            echo -e "  ${green}opkg update && opkg install curl tar && cd /tmp${reset}"
+            echo -e "  ${green}"'sh -c "$(curl -sSL https://raw.githubusercontent.com/jameszeroX/XKeen/main/install.sh)"'"${reset}"
 
 
         ;;
@@ -896,7 +941,6 @@ while [ $# -gt 0 ]; do
 
         -dgi)    # Удалить GeoIP
             smart_clear
-            echo
             choice_for_remove="GeoIP"
             choice_remove
 
@@ -914,7 +958,6 @@ while [ $# -gt 0 ]; do
 
         -dgs)    # Удалить GeoSite
             smart_clear
-            echo
             choice_for_remove="GeoSite"
             choice_remove
 
@@ -1023,6 +1066,7 @@ while [ $# -gt 0 ]; do
             echo
             echo -e "  Удаление ${yellow}XKeen${reset}"
             opkg remove xkeen
+            echo
             delete_tmp
 
             smart_clear
@@ -1034,15 +1078,15 @@ while [ $# -gt 0 ]; do
             echo
             echo -e "  Установить ${yellow}XKeen${reset} заново можно командами:"
             echo
-            echo -e "  ${green}opkg update && opkg upgrade && opkg install curl tar && cd /tmp${reset}"
-            echo -e "  ${green}sh -c "$(curl -sSL https://raw.githubusercontent.com/jameszeroX/XKeen/main/install.sh)"${reset}"
+            echo -e "  ${green}opkg update && opkg install curl tar && cd /tmp${reset}"
+            echo -e "  ${green}"'sh -c "$(curl -sSL https://raw.githubusercontent.com/jameszeroX/XKeen/main/install.sh)"'"${reset}"
         ;;
 
 
         -k)    # Переустановка XKeen
-            . "/opt/sbin/.xkeen/01_info/03_info_cpu.sh"
-            status_file="/opt/lib/opkg/status"
-            xkeen_info
+            test_connection
+            check_health
+            test_entware
             xkeen_set_info
 
             smart_clear
@@ -1056,18 +1100,11 @@ while [ $# -gt 0 ]; do
                 else
                     download_func="download_xkeen_dev"
                 fi
-                test_connection
-                test_entware
                 test_github
                 sleep 2
                 "$download_func"
-            else
-                opkg update >/dev/null 2>&1
-                info_packages
-                install_packages
             fi
 
-            echo
             install_xkeen
 
             # Перезапуск скрипта
@@ -1076,12 +1113,18 @@ while [ $# -gt 0 ]; do
 
 
         -k_post_install)
-            . "/opt/sbin/.xkeen/import.sh"
+            . "$xkeen_dir/import.sh"
             init_directories
-            xkeen_info
             xkeen_set_info
-            info_packages
-            install_packages
+            new_features
+            register_cron_initd
+            migrate_ports_from_initd
+            register_xkeen_initd
+            create_xkeen_cfg
+            choice_cancel_cron_select=true
+            update_cron_geofile_task
+            smart_clear
+            echo
 
             echo -e "  Выполняется отмена регистрации предыдущей версии ${yellow}XKeen${reset}"
             delete_register_xkeen
@@ -1097,28 +1140,24 @@ while [ $# -gt 0 ]; do
             register_xkeen_status
             logs_register_xkeen_status_info_console
 
-            register_cron_initd
-            migrate_ports_from_initd
-            register_xkeen_initd
-            create_xkeen_cfg
-            choice_cancel_cron_select=true
-            update_cron_geofile_task
-            fixed_register_packages
-
-            if pidof xray >/dev/null || pidof mihomo >/dev/null ; then
+            if is_proxy_running; then
                 "$initd_file" restart on >/dev/null 2>&1
             fi
 
+            fixed_register_packages
+            echo
             delete_tmp
 
             echo
             echo -e "  Переустановка XKeen ${green}выполнена${reset}"
+            version_xkeen
         ;;
 
 
-        -g)    # Установка баз GeoFile
+        -g)    # Переустановка баз GeoFile
             command -v xray >/dev/null 2>&1 || { echo -e "  ${red}Не обнаружено${reset} ядро проксирования Xray"; exit 1; }
             test_connection
+            check_health
             test_github
             sleep 2
 
@@ -1137,14 +1176,13 @@ while [ $# -gt 0 ]; do
             install_geoip
             sleep 2
 
-            smart_clear
-            echo
-            echo -e "  Установка баз GeoFile ${green}выполнена${reset}"
+            echo -e "  Переустановка баз GeoFile ${green}выполнена${reset}"
         ;;
 
 
         -gips)    # Установка GeoIPSET
             test_connection
+            check_health
             test_github
 
             smart_clear
@@ -1160,7 +1198,6 @@ while [ $# -gt 0 ]; do
 
         -kb)    # Резервное копирование XKeen
             echo -e "  Создание резервной копии ${yellow}XKeen${reset}"
-            info_version_xkeen
             manual_backup="on"
             backup_xkeen
         ;;
@@ -1207,22 +1244,7 @@ while [ $# -gt 0 ]; do
 
 
         -v|-version)    # Показать версию XKeen
-            echo -e "  Версия ${yellow}XKeen $xkeen_current_version $xkeen_build${reset} (время сборки: ${light_blue}$build_timestamp${reset})"
-
-            info_xray
-            info_version_xray
-            info_mihomo
-            info_version_mihomo
-            info_version_yq
-
-            if [ -f "$install_dir/xray" ] && grep -q 'name_client="xray"' "$initd_file"; then
-                echo -e "  Ядро проксирования Xray версии ${yellow}$xray_current_version${reset}"
-            elif [ -f "$install_dir/mihomo" ] && grep -q 'name_client="mihomo"' "$initd_file"; then
-                echo -e "  Ядро проксирования Mihomo версии ${yellow}$mihomo_current_version${reset}"
-                echo -e "  Парсер конфигурационных файлов Yq версии ${yellow}$yq_current_version${reset}"
-            else
-                echo -e "  Ядро проксирования ${red}не установлено${reset}"
-            fi
+            version_xkeen
         ;;
 
 
@@ -1273,11 +1295,30 @@ while [ $# -gt 0 ]; do
         ;;
 
 
+        -dscp)    # Состояние DSCP
+            smart_clear
+            "$initd_file" dscp
+            action=$(get_state_arg "$2")
+            [ -n "$action" ] && shift
+            change_dscp_proxy "$action"
+
+        ;;
+
+
         -auto)    # Смена режима запуска XKeen
             action=$(get_state_arg "$2")
             [ -n "$action" ] && shift
             smart_clear
             change_autostart_xkeen "$action"
+            add_chmod_init
+        ;;
+
+
+        -startvb)    # Вывод информации при старте прокси-клиента
+            action=$(get_state_arg "$2")
+            [ -n "$action" ] && shift
+            smart_clear
+            change_start_verbose "$action"
             add_chmod_init
         ;;
 
@@ -1300,10 +1341,11 @@ while [ $# -gt 0 ]; do
 
         -ap)    # Добавить порт проксирования
             shift
-            add_ports_donor "$*"
+            add_ports_donor "$@"
+            shift $#
             sleep 2
             add_chmod_init
-            if pidof xray >/dev/null || pidof mihomo >/dev/null; then
+            if is_proxy_running; then
                 "$initd_file" restart on >/dev/null 2>&1
             fi
         ;;
@@ -1311,10 +1353,11 @@ while [ $# -gt 0 ]; do
 
         -dp)    # Удалить порт проксирования
             shift
-            dell_ports_donor "$*"
+            del_ports_donor "$@"
+            shift $#
             sleep 2
             add_chmod_init
-            if pidof xray >/dev/null || pidof mihomo >/dev/null; then
+            if is_proxy_running; then
                 "$initd_file" restart on >/dev/null 2>&1
             fi
         ;;
@@ -1327,10 +1370,11 @@ while [ $# -gt 0 ]; do
 
         -ape)    # Добавить порт-исключение проксирования
             shift
-            add_ports_exclude "$*" 
+            add_ports_exclude "$@"
+            shift $#
             sleep 2
             add_chmod_init
-            if pidof xray >/dev/null || pidof mihomo >/dev/null; then
+            if is_proxy_running; then
                 "$initd_file" restart on >/dev/null 2>&1
             fi
         ;;
@@ -1338,10 +1382,11 @@ while [ $# -gt 0 ]; do
 
         -dpe)    # Удалить порт-исключение проксирования
             shift
-            dell_ports_exclude "$*"
+            del_ports_exclude "$@"
+            shift $#
             sleep 2
             add_chmod_init
-            if pidof xray >/dev/null || pidof mihomo >/dev/null; then
+            if is_proxy_running; then
                 "$initd_file" restart on >/dev/null 2>&1
             fi
         ;;
@@ -1352,20 +1397,14 @@ while [ $# -gt 0 ]; do
         ;;
 
 
-        -modules)    # Obsolete
-            smart_clear
-            echo
-            migration_modules
-        ;;
-
-        -delmodules)    # Obsolete
-            smart_clear
-            echo
-            remove_modules
+        -di)    # Время ожидания инициализации роутера
+            shift
+            delay_init "$1"
+            add_chmod_init
         ;;
 
 
-        -d)    # Установка задержки автозапуска в секундах
+        -d)    # Время ожидания успешного запуска
             shift
             delay_autostart "$1"
             add_chmod_init
@@ -1421,6 +1460,31 @@ while [ $# -gt 0 ]; do
         ;;
 
 
+        -pbr)    # Управление strict PBR-проверкой для исходящих подключений Xray/Mihomo
+            case "$2" in
+                on|off)
+                    smart_clear
+                    change_pbr_strict "$2"
+                    shift
+                    ;;
+                status)
+                    smart_clear
+                    show_pbr_strict_status
+                    shift
+                    ;;
+                codes)
+                    smart_clear
+                    show_pbr_policy_codes
+                    shift
+                    ;;
+                *)
+                    echo -e "  ${red}Ошибка${reset}: используйте ${yellow}xkeen -pbr on${reset}, ${yellow}off${reset}, ${yellow}status${reset} или ${yellow}codes${reset}"
+                    exit 1
+                    ;;
+            esac
+        ;;
+
+
         -extmsg)    # Включение/отключение расширенных сообщений запуска XKeen
             action=$(get_state_arg "$2")
             [ -n "$action" ] && shift
@@ -1442,6 +1506,23 @@ while [ $# -gt 0 ]; do
             [ -n "$action" ] && shift
             smart_clear
             change_aghfix_xkeen "$action"
+        ;;
+
+
+        -xtest)    # Проверка конфигурации Xray
+            core_conf_test xray
+        ;;
+
+
+        -mtest)    # Проверка конфигурации Mihomo
+            core_conf_test mihomo
+        ;;
+
+
+        -health)    # Базовая проверка исправности Entware
+            test_connection
+            check_health
+            echo -e "  Базовая проверка ${yellow}Entware${reset} выполнена. ${green}Система исправна${reset}"
         ;;
 
 

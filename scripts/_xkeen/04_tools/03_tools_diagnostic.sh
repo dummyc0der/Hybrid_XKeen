@@ -1,3 +1,4 @@
+# Функция создания диагностического отчёта
 diagnostic() {
     # Установка пути к файлу diagnostic
     diagnostic="/opt/diagnostic.txt"
@@ -44,9 +45,11 @@ diagnostic() {
     # Функция маскировки чувствительных данных в конфигах Xray
     mask_xray_sensitive_data() {
         sed -E \
-            -e 's/("(id|uuid|password|user|pass|auth|secretKey|preSharedKey)")[[:space:]]*:[[:space:]]*"?[^",[:space:]]+"?(,?)/\1: "***MASKED***"\3/g' \
-            -e 's/("(address|host|serverName|sni|path|token|spiderX)")[[:space:]]*:[[:space:]]*"?[^",[:space:]]+"?(,?)/\1: "***MASKED***"\3/g' \
-            -e 's/("(publicKey|privateKey|shortId|mldsa65Verify|encryption)")[[:space:]]*:[[:space:]]*"?[^",[:space:]]+"?(,?)/\1: "***MASKED***"\3/g'
+            -e 's/("(id|uuid|address|host|publicKey|privateKey)")[[:space:]]*:[[:space:]]*"?[^",[:space:]]+"?(,?)/\1: "***MASKED***"\3/g' \
+            -e 's/("(password|user|pass|auth|encryption)")[[:space:]]*:[[:space:]]*"?[^",[:space:]]+"?(,?)/\1: "***MASKED***"\3/g' \
+            -e 's/("(secretKey|preSharedKey|dest|token)")[[:space:]]*:[[:space:]]*"?[^",[:space:]]+"?(,?)/\1: "***MASKED***"\3/g' \
+            -e 's/("(serverName|serverNames|sni|path|spiderX)")[[:space:]]*:[[:space:]]*"?[^",[:space:]]+"?(,?)/\1: "***MASKED***"\3/g' \
+            -e 's/("(shortId|shortIds|mldsa65Verify|mldsa65Seed)")[[:space:]]*:[[:space:]]*"?[^",[:space:]]+"?(,?)/\1: "***MASKED***"\3/g'
     }
 
     # Функция маскировки чувствительных данных в конфигах Mihomo
@@ -73,7 +76,7 @@ diagnostic() {
     dump_tables() {
         local cmd="$1"
         local ver="$2"
-        for chain in PREROUTING xkeen xkeen_out OUTPUT; do
+        for chain in PREROUTING xkeen xkeen_force xkeen_out OUTPUT; do
             $cmd -w -t nat -nvL "$chain" 2>&1 | log_block "Результат таблицы NAT цепи $chain $ver"
             $cmd -w -t mangle -nvL "$chain" 2>&1 | log_block "Результат таблицы MANGLE цепи $chain $ver"
         done
@@ -112,13 +115,18 @@ diagnostic() {
 
     log_file "/opt/etc/ndm/netfilter.d/proxy.sh" "Содержимое файла /opt/etc/ndm/netfilter.d/proxy.sh"
 
-    curl -kfsS "localhost:79/rci/ip/http/ssl" | jq -r '.port' | log_block "Проверка использования SSL порта"
-    curl -kfsS "localhost:79/rci/show/ip/policy" | jq -r '.[] | select(.description | ascii_downcase == "xkeen")' | log_block "Данные о политике доступа"
-    
+    curl_api "localhost:79/rci/ip/http/ssl" | jq -r '.port' | log_block "Проверка использования SSL порта"
+    curl_api "localhost:79/rci/show/ip/policy" | jq -r '.[] | select(.description | ascii_downcase == "xkeen")' | log_block "Данные о политике доступа"
+
     ip rule show | log_block "Результат команды ip rule show"
     ip route show table main | log_block "Результат команды ip route show table main"
-    
-    curl -kfsS "localhost:79/rci/show/version" | jq -r '.title, .model, .region' | log_block "Данные из localhost:79/rci/show/version"
+
+    {
+        curl_api "localhost:79/rci/show/version" | jq -r '.title, .model, .region'
+        echo
+        echo "Архитектура пакетов (opkg):"
+        opkg print-architecture 2>/dev/null || echo "Команда opkg недоступна"
+    } | log_block "Информация о роутере"
 
     {
         if [ "${name_client}" = "xray" ]; then xray version; else mihomo -v; fi
