@@ -136,6 +136,12 @@ while [ $# -gt 0 ]; do
             init_directories
             xkeen_set_info
             logs_cpu_info_console
+            if [ -f "$install_dir/sing-box" ]; then
+                chmod +x "$install_dir/sing-box" 2>/dev/null
+                sing_box_installed="installed"
+            else
+                sing_box_installed="not_installed"
+            fi
 
             case "$architecture" in
                 arm64-v8a|mips32le|mips32) ;;
@@ -203,7 +209,7 @@ while [ $# -gt 0 ]; do
                 add_mihomo_config
             fi
 
-            if [ "$mihomo_installed" != "installed" ] && [ "$xray_installed" != "installed" ]; then
+            if [ "$mihomo_installed" != "installed" ] && [ "$xray_installed" != "installed" ] && [ "$sing_box_installed" != "installed" ]; then
                 echo
                 echo -e "  ${red}Ошибка${reset}: Установка прервана. Не установлено ни одного ядра проксирования (Xray или Mihomo)"
                 exit 1
@@ -225,7 +231,7 @@ while [ $# -gt 0 ]; do
                 sleep 2
             fi
 
-            if [ "$xray_installed" = "installed" ] || [ "$mihomo_installed" = "installed" ]; then
+            if [ "$xray_installed" = "installed" ] || [ "$mihomo_installed" = "installed" ] || [ "$sing_box_installed" = "installed" ]; then
                 smart_clear
                 # Устанавливаем GeoIPSET
                 install_geoipset init
@@ -282,7 +288,7 @@ while [ $# -gt 0 ]; do
                 sleep 2
             fi
 
-            if [ "$xray_installed" = "installed" ] || [ "$mihomo_installed" = "installed" ]; then
+            if [ "$xray_installed" = "installed" ] || [ "$mihomo_installed" = "installed" ] || [ "$sing_box_installed" = "installed" ]; then
                 delete_register_xkeen
                 echo
                 echo -e "  Выполняется регистрация ${yellow}XKeen${reset}"
@@ -297,6 +303,9 @@ while [ $# -gt 0 ]; do
 
                 migrate_ports_from_initd
                 register_xkeen_initd
+                if [ "$xray_installed" != "installed" ] && [ "$mihomo_installed" != "installed" ] && [ "$sing_box_installed" = "installed" ]; then
+                    sed -i 's/^name_client=.*/name_client="sing-box"/' "$initd_file"
+                fi
                 create_xkeen_cfg
                 sleep 2
 
@@ -396,7 +405,7 @@ while [ $# -gt 0 ]; do
                     echo -e "  ${red}Не найден${reset} парсер конфигурационных файлов Mihomo - Yq"
                     exit 1
                 fi
-            else
+            elif [ ! -f "$install_dir/sing-box" ]; then
                 smart_clear
                 echo
                 echo -e "  ${red}Не найдено ядро проксирования xray или mihomo${reset}"
@@ -409,6 +418,11 @@ while [ $# -gt 0 ]; do
                 echo -e "  Страница загрузок yq: ${yellow}https://github.com/mikefarah/yq/releases/latest${reset}"
                 echo
                 exit 1
+            fi
+
+            if [ -f "$install_dir/sing-box" ] && [ ! -f "$install_dir/xray" ] && [ ! -f "$install_dir/mihomo" ]; then
+                chmod +x "$install_dir/sing-box"
+                sing_box_installed="installed"
             fi
 
             if [ -f "$install_dir/xray" ]; then
@@ -468,6 +482,9 @@ while [ $# -gt 0 ]; do
 
             migrate_ports_from_initd
             register_xkeen_initd
+            if [ "$xray_installed" != "installed" ] && [ "$mihomo_installed" != "installed" ] && [ "$sing_box_installed" = "installed" ]; then
+                sed -i 's/^name_client=.*/name_client="sing-box"/' "$initd_file"
+            fi
             create_xkeen_cfg
 
             fixed_register_packages
