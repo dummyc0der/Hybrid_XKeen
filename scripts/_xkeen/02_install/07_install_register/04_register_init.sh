@@ -1354,6 +1354,8 @@ get_port_tproxy() {
             port=$(DSCP_FORCE_TAG="$dscp_force_proxy_tag" DSCP_FORCE_TAG_REDIRECT="${dscp_force_proxy_tag}-redirect" DSCP_FORCE_TAG_TPROXY="${dscp_force_proxy_tag}-tproxy" yq eval '.listeners[] | select(.type == "tproxy" and (.name // "") != strenv(DSCP_FORCE_TAG) and (.name // "") != strenv(DSCP_FORCE_TAG_REDIRECT) and (.name // "") != strenv(DSCP_FORCE_TAG_TPROXY)) | .port // ""' "$mihomo_config" 2>/dev/null | sed -n '1p')
         fi
         [ -n "$port" ] && echo "$port" && return 0
+    elif [ "$name_client" = "sing-box" ]; then
+        echo "1181" && return 0
     else
         return 1
     fi
@@ -1386,6 +1388,8 @@ get_network_tproxy() {
             echo ""
         fi
         return 0
+    elif [ "$name_client" = "sing-box" ]; then
+        echo "tcp" && return 0
     else
         return 1
     fi
