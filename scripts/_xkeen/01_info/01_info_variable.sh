@@ -70,6 +70,9 @@ conn_IP2="77.88.44.55"
 # -------------------------------------
 xray_free_space=40
 mihomo_free_space=52
+# v1.13.3 linux-arm64: sing-box 53805312 B + Cronet 11703696 B;
+# установленная пара + полная временная распаковка (с LICENSE), округление вверх в MiB. Архив в RAM.
+sing_box_free_space=125
 target_dir="/opt"
 
 # -------------------------------------
@@ -85,10 +88,19 @@ xray_zip_url="https://github.com/XTLS/Xray-core/releases/download"				# url дл
 mihomo_api_url="https://api.github.com/repos/MetaCubeX/mihomo/releases"				# url api для Mihomo
 mihomo_jsd_url="https://data.jsdelivr.com/v1/package/gh/MetaCubeX/mihomo"			# резервный url api для Mihomo
 mihomo_gz_url="https://github.com/MetaCubeX/mihomo/releases/download"				# url для загрузки Mihomo
+sing_box_api_url="https://api.github.com/repos/SagerNet/sing-box/releases"			# url api для sing-box
+sing_box_jsd_url="https://data.jsdelivr.com/v1/package/gh/SagerNet/sing-box"			# резервный url api для sing-box
+sing_box_tar_url="https://github.com/SagerNet/sing-box/releases/download"			# url для загрузки sing-box
 yq_upstream_dist_url="https://github.com/mikefarah/yq/releases/latest/download"			# url для загрузки оригинального Yq
 yq_workaround_dist_url="https://github.com/jameszeroX/yq/releases/latest/download"		# url для загрузки рабочего Yq
 gh_proxy1="https://gh-proxy.com"								# 1 прокси для загрузок с GitHub
 gh_proxy2="https://ghfast.top"									# 2 прокси для загрузок с GitHub
+
+# Политика выбора релиза sing-box; также для будущего механизма обновления.
+# validated — версия, подтверждённая тестированием/эксплуатацией Hybrid_XKeen.
+# latest — новейший стабильный релиз upstream.
+sing_box_release_policy="validated"   # validated | latest
+sing_box_validated_version="v1.13.3"
 
 yq_use_workaround="false"									# включить при возникноверии пробелем, подобных issue 2609
 yq_workaround_issue_url="https://github.com/mikefarah/yq/issues/2609"				# issue с поломанным релизом Yq

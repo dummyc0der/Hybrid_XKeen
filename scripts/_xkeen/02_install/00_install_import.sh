@@ -4,6 +4,7 @@
 . "$xinstall_dir/01_install_packages.sh"
 . "$xinstall_dir/02_install_xray.sh"
 . "$xinstall_dir/02_install_mihomo.sh"
+. "$xinstall_dir/02_install_sing_box.sh"
 . "$xinstall_dir/03_install_xkeen.sh"
 . "$xinstall_dir/04_install_geofile.sh"
 . "$xinstall_dir/05_install_geoipset.sh"

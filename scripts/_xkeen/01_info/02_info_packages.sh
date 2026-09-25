@@ -45,3 +45,7 @@ info_packages_iptables=$package_status
 # Проверка наличия пакета "ipset"
 info_packages "ipset"
 info_packages_ipset=$package_status
+
+# Проверка наличия пакета "patchelf"
+info_packages "patchelf"
+info_packages_patchelf=$package_status

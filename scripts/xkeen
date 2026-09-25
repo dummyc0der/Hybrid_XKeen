@@ -136,11 +136,12 @@ while [ $# -gt 0 ]; do
             init_directories
             xkeen_set_info
             logs_cpu_info_console
+            sing_box_installed="not_installed"
             if [ -f "$install_dir/sing-box" ]; then
                 chmod +x "$install_dir/sing-box" 2>/dev/null
-                sing_box_installed="installed"
-            else
-                sing_box_installed="not_installed"
+                if [ -x "$install_dir/sing-box" ] && LD_LIBRARY_PATH=/opt/lib "$install_dir/sing-box" version >/dev/null 2>&1; then
+                    sing_box_installed="installed"
+                fi
             fi
 
             case "$architecture" in
@@ -209,9 +210,42 @@ while [ $# -gt 0 ]; do
                 add_mihomo_config
             fi
 
+            bypass_sing_box=""
+            if [ "$add_sing_box" = "true" ] && [ "$sing_box_installed" != "installed" ]; then
+                if ! _sing_box_check_architecture; then
+                    add_sing_box="false"
+                    bypass_sing_box="true"
+                else
+                    check_free_space sing-box || add_sing_box="false"
+                fi
+            fi
+
+            if [ "$add_sing_box" = "true" ] && [ "$sing_box_installed" != "installed" ]; then
+                smart_clear
+                if ! download_sing_box; then
+                    bypass_sing_box="true"
+                fi
+            else
+                [ "$sing_box_installed" = "installed" ] || bypass_sing_box="true"
+            fi
+
+            if [ -z "$bypass_sing_box" ] && [ "$sing_box_installed" != "installed" ]; then
+                if ! install_sing_box; then
+                    bypass_sing_box="true"
+                fi
+            fi
+
+            # Состояние определяется работающим бинарником, в том числе после отката.
+            sing_box_installed="not_installed"
+            if [ -x "$install_dir/sing-box" ] && LD_LIBRARY_PATH=/opt/lib "$install_dir/sing-box" version >/dev/null 2>&1; then
+                sing_box_installed="installed"
+            else
+                bypass_sing_box="true"
+            fi
+
             if [ "$mihomo_installed" != "installed" ] && [ "$xray_installed" != "installed" ] && [ "$sing_box_installed" != "installed" ]; then
                 echo
-                echo -e "  ${red}Ошибка${reset}: Установка прервана. Не установлено ни одного ядра проксирования (Xray или Mihomo)"
+                echo -e "  ${red}Ошибка${reset}: Установка прервана. Не установлено ни одного ядра проксирования (Xray, Mihomo или sing-box)"
                 exit 1
             fi
 

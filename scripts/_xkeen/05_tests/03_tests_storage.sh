@@ -55,6 +55,7 @@ check_free_space() {
     case "$client_name" in
         xray)   required_space=$xray_free_space ;;
         mihomo) required_space=$mihomo_free_space ;;
+        sing-box) required_space=$sing_box_free_space ;;
         *)      return 0 ;;
     esac
 

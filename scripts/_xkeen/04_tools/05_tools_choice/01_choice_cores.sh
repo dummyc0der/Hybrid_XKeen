@@ -7,6 +7,10 @@ choice_add_proxy_cores() {
         echo "     1. Xray"
         echo "     2. Mihomo"
         echo "     3. Xray + Mihomo"
+        echo "     4. sing-box"
+        echo "     5. Xray + sing-box"
+        echo "     6. Mihomo + sing-box"
+        echo "     7. Xray + Mihomo + sing-box"
         echo
         echo "     0. Пропустить загрузку ядра проксирования, если оно уже установлено"
         echo
@@ -14,12 +18,13 @@ choice_add_proxy_cores() {
         valid_input=true
         add_xray=false
         add_mihomo=false
+        add_sing_box=false
 
         while true; do
             read -r -p "  Ваш выбор: " proxy_choice
             proxy_choice=$(echo "$proxy_choice" | sed 's/,/, /g')
 
-            if echo "$proxy_choice" | grep -qE '^[0-3]$'; then
+            if echo "$proxy_choice" | grep -qE '^[0-7]$'; then
                 break
             else
                 echo -e "  ${red}Некорректный ввод.${reset} Выберите один из предложенных вариантов"
@@ -37,10 +42,27 @@ choice_add_proxy_cores() {
                 add_xray=true
                 add_mihomo=true
                 ;;
+            4)
+                add_sing_box=true
+                ;;
+            5)
+                add_xray=true
+                add_sing_box=true
+                ;;
+            6)
+                add_mihomo=true
+                add_sing_box=true
+                ;;
+            7)
+                add_xray=true
+                add_mihomo=true
+                add_sing_box=true
+                ;;
             0)
                 echo "  Выполнен пропуск установки / обновления ядра проксирования"
                 add_xray=false
                 add_mihomo=false
+                add_sing_box=false
                 ;;
             *)
                 echo -e "  ${red}Некорректный ввод${reset}"
